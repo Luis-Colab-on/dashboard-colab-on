@@ -1,85 +1,160 @@
 <?php
 /*
 Plugin Name: Meu Plugin Dashboard Assinantes
-Description: Exibe todas as assinaturas Asaas e últimos pedidos WooCommerce via shortcode [dashboard_assinantes]
-Version: 1.3
+Description: Exibe assinaturas Asaas agrupadas por status (Em Dia, Em Atraso e Canceladas) via shortcode [dashboard_assinantes_e_pedidos]
+Version: 1.7
 Author: Luis Furtado
 */
 
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * 1) Busca todas as assinaturas + nome/email do WP User
+ */
 function fetch_all_asaas_subscriptions() {
     global $wpdb;
-    $subs_table = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions';
 
-    // Query que percorre toda a tabela de assinaturas
-    return $wpdb->get_results(
-        "SELECT * FROM {$subs_table}",
-        ARRAY_A  // retorna como array associativo
-    );
+    $subs_table  = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions';
+    $users_table = $wpdb->users; // normalmente 'wp_users'
+
+    $sql = "
+      SELECT 
+        s.*,
+        u.display_name   AS customer_name,
+        u.user_email     AS customer_email
+      FROM {$subs_table} s
+      LEFT JOIN {$users_table} u 
+        ON u.ID = s.userID
+      ORDER BY s.id DESC
+    ";
+
+    return $wpdb->get_results( $sql, ARRAY_A );
 }
 
-function fetch_all_wc_orders() {
+/**
+ * 2) Busca as parcelas de cada assinatura
+ */
+function fetch_asaas_subscription_items( $subscription_id ) {
     global $wpdb;
-    $orders_table = $wpdb->prefix . 'wc_orders';
 
-    // Query que percorre toda a tabela de pedidos (custom WC)
+    $items_table = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions_items';
+
     return $wpdb->get_results(
-        "SELECT * FROM {$orders_table}",
+        $wpdb->prepare(
+            "SELECT *
+             FROM {$items_table}
+             WHERE subscription_id = %d
+             ORDER BY due_date ASC",
+            $subscription_id
+        ),
         ARRAY_A
     );
 }
 
+/**
+ * 3) Monta o HTML do dashboard
+ */
 function mostrar_dashboard_assinantes() {
-    // Busca os dados
-    $assinaturas = fetch_all_asaas_subscriptions();
-    $pedidos     = fetch_all_wc_orders();
+    $subs = fetch_all_asaas_subscriptions();
 
-    // HTML de assinaturas
-    $html  = '<h3>Status de Assinaturas Asaas</h3>';
-    $html .= '<p>Total de assinaturas encontradas: ' . count($assinaturas) . '</p>';
-    if ( empty($assinaturas) ) {
-        $html .= '<p><em>Nenhuma assinatura encontrada.</em></p>';
-    } else {
-        $html .= '<table border="1" cellpadding="4" cellspacing="0">';
-        $headings = array_keys( $assinaturas[0] );
-        $html .= '<tr>';
-        foreach ( $headings as $col ) {
-            $html .= '<th>' . esc_html($col) . '</th>';
+    // agrupa em 3 categorias
+    $grupos = [
+      'em_dia'     => [],
+      'em_atraso'  => [],
+      'canceladas' => [],
+    ];
+
+    foreach ( $subs as $sub ) {
+        $items = fetch_asaas_subscription_items( $sub['id'] );
+
+        // se a assinatura foi cancelada
+        if ( in_array( strtoupper($sub['status']), ['CANCELLED','CANCELED'] ) ) {
+            $grupos['canceladas'][] = compact('sub','items');
+            continue;
         }
-        $html .= '</tr>';
 
-        // linhas
-        foreach ( $assinaturas as $row ) {
-            $html .= '<tr>';
-            foreach ( $row as $val ) {
-                $html .= '<td>' . esc_html($val) . '</td>';
+        // senão, verifica se existe parcela em atraso
+        $temAtraso = false;
+        foreach ( $items as $it ) {
+            $st  = strtoupper( $it['status'] );
+            $due = strtotime( $it['due_date'] );
+            if ( $st === 'OVERDUE' || ($due < time() && $st !== 'PAID') ) {
+                $temAtraso = true;
+                break;
             }
-            $html .= '</tr>';
         }
-        $html .= '</table>';
+
+        if ( $temAtraso ) {
+            $grupos['em_atraso'][] = compact('sub','items');
+        } else {
+            $grupos['em_dia'][] = compact('sub','items');
+        }
     }
 
-    // HTML 
-    $html .= '<h3>Últimos Pedidos WooCommerce (raw)</h3>';
-    $html .= '<p>Total de pedidos encontrados: ' . count($pedidos) . '</p>';
-    if ( empty($pedidos) ) {
-        $html .= '<p><em>Nenhum pedido encontrado.</em></p>';
-    } else {
-        $html .= '<table border="1" cellpadding="4" cellspacing="0">';
-        $headings = array_keys( $pedidos[0] );
-        $html .= '<tr>';
-        foreach ( $headings as $col ) {
-            $html .= '<th>' . esc_html($col) . '</th>';
-        }
-        $html .= '</tr>';
+    // CSS inline para tabelas e caixinhas
+    $html = '
+    <style>
+      .dash-table { width:100%; border-collapse:collapse; margin-bottom:2em; }
+      .dash-table th, .dash-table td { border:1px solid #ccc; padding:6px; }
+      .status-box { display:inline-block; width:12px; height:12px; margin-right:2px; vertical-align:middle; }
+      .paid    { background:green; }
+      .overdue { background:red; }
+      .future  { background:transparent; border:1px solid #ccc; }
+      .dash-section { margin-top:1.5em; }
+      .dash-section h3 { margin-bottom:0.5em; }
+    </style>
+    ';
 
-        foreach ( $pedidos as $row ) {
-            $html .= '<tr>';
-            foreach ( $row as $val ) {
-                $html .= '<td>' . esc_html($val) . '</td>';
-            }
-            $html .= '</tr>';
+    // helper para renderizar cada linha
+    $render_row = function( $sub, $items ) {
+        $r  = '<tr>';
+        // campos vindos do JOIN
+        $r .= '<td>'.esc_html( $sub['customer_name']  ?? '—' ).'</td>';
+        $r .= '<td>'.esc_html( $sub['customer_email'] ?? '—' ).'</td>';
+        // cpf já está na tabela de assinaturas
+        $r .= '<td>'.esc_html( $sub['cpf'] ).'</td>';
+        // caixa de pagamentos
+        $r .= '<td>';
+        foreach ( $items as $it ) {
+            $st  = strtoupper( $it['status'] );
+            $cls = $st==='PAID'    ? 'paid'
+                 : ($st==='OVERDUE' ? 'overdue' : 'future');
+            $r .= "<span class='status-box {$cls}'></span>";
         }
-        $html .= '</table>';
+        $r .= '</td>';
+        // status geral ou data de cancelamento
+        $r .= '<td>';
+        if ( in_array( strtoupper($sub['status']), ['CANCELLED','CANCELED'] ) ) {
+            $data = $sub['cancelled_at'] ?? $sub['updated'];
+            $r .= 'Cancelado em '. date_i18n('d/m/Y', strtotime($data));
+        } else {
+            $r .= ucfirst( strtolower($sub['status']) );
+        }
+        $r .= '</td>';
+        $r .= '</tr>';
+        return $r;
+    };
+
+    // monta cada seção
+    foreach ([
+        'em_dia'     => 'Em Dia',
+        'em_atraso'  => 'Em Atraso',
+        'canceladas' => 'Canceladas',
+    ] as $key => $titulo ) {
+        $html .= "<div class='dash-section'>";
+        $html .= "<h3>Assinaturas — {$titulo}</h3>";
+        $html .= "<table class='dash-table'>";
+        $html .= '<tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr>';
+
+        if ( empty( $grupos[$key] ) ) {
+            $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
+        } else {
+            foreach ( $grupos[$key] as $entry ) {
+                $html .= $render_row( $entry['sub'], $entry['items'] );
+            }
+        }
+
+        $html .= '</table></div>';
     }
 
     return $html;
