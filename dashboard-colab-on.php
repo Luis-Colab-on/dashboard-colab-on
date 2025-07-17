@@ -15,7 +15,7 @@ function fetch_all_asaas_subscriptions() {
     global $wpdb;
 
     $subs_table  = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions';
-    $users_table = $wpdb->users; // normalmente 'wp_users'
+    $users_table = $wpdb->users;
 
     $sql = "
       SELECT 
@@ -28,22 +28,40 @@ function fetch_all_asaas_subscriptions() {
       ORDER BY s.id DESC
     ";
 
-    return $wpdb->get_results( $sql, ARRAY_A );
+    $subs = $wpdb->get_results( $sql, ARRAY_A );
+
+    foreach ( $subs as &$sub ) {
+        if ( empty( $sub['customer_name'] ) && ! empty( $sub['nome_cliente'] ) ) {
+            $sub['customer_name'] = $sub['nome_cliente'];
+        }
+        if ( empty( $sub['customer_email'] ) && ! empty( $sub['email_cliente'] ) ) {
+            $sub['customer_email'] = $sub['email_cliente'];
+        }
+    }
+    unset( $sub );
+
+    return $subs;
 }
+
+
+
 
 /**
  * 2) Busca as parcelas de cada assinatura
  */
 function fetch_asaas_subscription_items( $subscription_id ) {
     global $wpdb;
-
     $items_table = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions_items';
+
+    // Se a coluna na sua tabela for "subscriptionId" em vez de "subscription_id",
+    // ajuste abaixo para '%s' e substitua pelo nome correto.
+    $col = 'subscription_id'; 
 
     return $wpdb->get_results(
         $wpdb->prepare(
             "SELECT *
              FROM {$items_table}
-             WHERE subscription_id = %d
+             WHERE {$col} = %s
              ORDER BY due_date ASC",
             $subscription_id
         ),
@@ -51,43 +69,56 @@ function fetch_asaas_subscription_items( $subscription_id ) {
     );
 }
 
+
+
+
 /**
  * 3) Monta o HTML do dashboard
  */
 function mostrar_dashboard_assinantes() {
-    $subs = fetch_all_asaas_subscriptions();
-
-    // agrupa em 3 categorias
+    $subs   = fetch_all_asaas_subscriptions();
+    $agora  = time();
     $grupos = [
       'em_dia'     => [],
       'em_atraso'  => [],
       'canceladas' => [],
     ];
 
+    // definir agrupamentos de status
+    $expiredStatuses  = ['CANCELLED','CANCELED','EXPIRED'];
+    $overdueStatuses  = ['OVERDUE','INACTIVE']; 
+
     foreach ( $subs as $sub ) {
+        $stat  = strtoupper( trim( $sub['status'] ?? '' ) );
         $items = fetch_asaas_subscription_items( $sub['id'] );
 
-        // se a assinatura foi cancelada
-        if ( in_array( strtoupper($sub['status']), ['CANCELLED','CANCELED'] ) ) {
+        // 1) Expired/Canceled ➞ Canceladas
+        if ( in_array( $stat, $expiredStatuses, true ) ) {
             $grupos['canceladas'][] = compact('sub','items');
             continue;
         }
 
-        // senão, verifica se existe parcela em atraso
-        $temAtraso = false;
-        foreach ( $items as $it ) {
-            $st  = strtoupper( $it['status'] );
-            $due = strtotime( $it['due_date'] );
-            if ( $st === 'OVERDUE' || ($due < time() && $st !== 'PAID') ) {
-                $temAtraso = true;
-                break;
+        // 2) Inactive ou OVERDUE ➞ Em Atraso
+        $hasOverdue = in_array( $stat, $overdueStatuses, true );
+
+        //    ou qualquer parcela vencida (por data/status)
+        if ( ! $hasOverdue ) {
+            foreach ( $items as $it ) {
+                $it_stat = strtoupper( $it['status'] ?? '' );
+                $due     = strtotime( $it['due_date'] );
+                if ( in_array( $it_stat, ['OVERDUE'], true )
+                  || ( $due && $due < $agora && $it_stat !== 'PAID' ) ) {
+                    $hasOverdue = true;
+                    break;
+                }
             }
         }
 
-        if ( $temAtraso ) {
+        if ( $hasOverdue ) {
             $grupos['em_atraso'][] = compact('sub','items');
         } else {
-            $grupos['em_dia'][] = compact('sub','items');
+            // 3) resto ➞ Em Dia
+            $grupos['em_dia'][]    = compact('sub','items');
         }
     }
 
@@ -95,25 +126,23 @@ function mostrar_dashboard_assinantes() {
     $html = '
     <style>
       .dash-table { width:100%; border-collapse:collapse; margin-bottom:2em; }
-      .dash-table th, .dash-table td { border:1px solid #ccc; padding:6px; }
+      .nome, .email, .cpf, .status { width:15%; }
+      .dash-table th, .dash-table td { border:2px solid #000; padding:5px;}
       .status-box { display:inline-block; width:12px; height:12px; margin-right:2px; vertical-align:middle; }
       .paid    { background:green; }
       .overdue { background:red; }
-      .future  { background:transparent; border:1px solid #ccc; }
-      .dash-section { margin-top:1.5em; }
+      .future  { background:transparent; border:2px solid #000; }
+      .dash-section { max-width: 100%; }
       .dash-section h3 { margin-bottom:0.5em; }
     </style>
     ';
 
-    // helper para renderizar cada linha
+    // renderizar cada linha
     $render_row = function( $sub, $items ) {
         $r  = '<tr>';
-        // campos vindos do JOIN
         $r .= '<td>'.esc_html( $sub['customer_name']  ?? '—' ).'</td>';
         $r .= '<td>'.esc_html( $sub['customer_email'] ?? '—' ).'</td>';
-        // cpf já está na tabela de assinaturas
         $r .= '<td>'.esc_html( $sub['cpf'] ).'</td>';
-        // caixa de pagamentos
         $r .= '<td>';
         foreach ( $items as $it ) {
             $st  = strtoupper( $it['status'] );
@@ -122,6 +151,7 @@ function mostrar_dashboard_assinantes() {
             $r .= "<span class='status-box {$cls}'></span>";
         }
         $r .= '</td>';
+        
         // status geral ou data de cancelamento
         $r .= '<td>';
         if ( in_array( strtoupper($sub['status']), ['CANCELLED','CANCELED'] ) ) {
@@ -144,7 +174,7 @@ function mostrar_dashboard_assinantes() {
         $html .= "<div class='dash-section'>";
         $html .= "<h3>Assinaturas — {$titulo}</h3>";
         $html .= "<table class='dash-table'>";
-        $html .= '<tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr>';
+        $html .= "<tr><th class='nome'>Nome</th><th class='email'>E-mail</th><th class='cpf'>CPF</th><th class='recorrencia'>Pagamentos</th><th class='status'>Status</th></tr>";
 
         if ( empty( $grupos[$key] ) ) {
             $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
