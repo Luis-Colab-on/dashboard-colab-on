@@ -2,7 +2,7 @@
 /*
 Plugin Name: Meu Plugin Dashboard Assinantes
 Description: Exibe assinaturas Asaas agrupadas por status (Em Dia, Em Atraso e Canceladas) via shortcode [dashboard_assinantes_e_pedidos]
-Version: 1.13
+Version: 1.14
 Author: Luis Furtado
 */
 
@@ -33,32 +33,38 @@ function fetch_all_asaas_subscriptions() {
 
 /**
  * 2) Busca todas as parcelas de assinatura na tabela de pagamentos
+ *    Ordenadas pelas datas mais antigas primeiro
  */
-function fetch_asaas_subscription_payments( $subscriptionID, $cpf ) {
+function fetch_asaas_subscription_payments( $subscriptionID ) {
     global $wpdb;
     $payments_table = $wpdb->prefix . 'processa_pagamentos_asaas';
 
-    return $wpdb->get_results(
-        $wpdb->prepare(
-            "SELECT *
-             FROM {$payments_table}
-             WHERE `type` = %s
-               AND ( orderID = %s OR cpf = %s )
-             ORDER BY dueDate ASC",
-            'assinatura',
-            $subscriptionID,
-            $cpf
-        ),
-        ARRAY_A
+    $sql = $wpdb->prepare(
+        "
+        SELECT *
+        FROM {$payments_table}
+        WHERE `type` = %s
+          AND orderID = %s
+        ORDER BY dueDate ASC, created ASC
+        ",
+        'assinatura',
+        $subscriptionID
     );
+
+    $payments = $wpdb->get_results( $sql, ARRAY_A );
+    usort($payments, function($a, $b){
+        return strtotime($a['dueDate']) <=> strtotime($b['dueDate']);
+    });
+    return $payments;
 }
+
 
 /**
  * 3) Monta o HTML do dashboard, com tooltips nas parcelas
  */
 function mostrar_dashboard_assinantes() {
-    $subs   = fetch_all_asaas_subscriptions();
-    $agora  = time();
+    $subs  = fetch_all_asaas_subscriptions();
+    $agora = time();
     $grupos = [
       'em_dia'     => [],
       'em_atraso'  => [],
@@ -71,7 +77,7 @@ function mostrar_dashboard_assinantes() {
     // Classifica em grupos
     foreach ( $subs as $sub ) {
         $stat_raw = strtoupper( trim( $sub['status'] ?? '' ) );
-        $payments = fetch_asaas_subscription_payments( $sub['subscriptionID'], $sub['cpf'] );
+            $payments = fetch_asaas_subscription_payments( $sub['subscriptionID'] );
 
         if ( in_array( $stat_raw, $expiredStatuses, true ) ) {
             $grupos['canceladas'][] = compact( 'sub', 'payments' );
@@ -113,56 +119,97 @@ function mostrar_dashboard_assinantes() {
   .debug-info { display:block; margin-bottom:6px; font-size:0.8em; color:#555; text-align:left; white-space:normal; }
 </style>';
 
-    // Função de renderização de linhas
+    // Campo de busca
+    $html .= '<div style="width:100%;">
+        <input
+        type="text"
+        id="search-assinantes"
+        placeholder="Buscar por nome, e-mail ou CPF…"
+        style="margin-bottom:12px;padding:6px;width:100%;max-width:400px;border-radius: 5px;border: 1px solid;"
+        >
+    </div>';
+
+    // Script de filtragem
+    $html .= "
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const input = document.getElementById('search-assinantes');
+      input.addEventListener('input', function() {
+        const filter = input.value.trim().toLowerCase();
+        document.querySelectorAll('.dash-table').forEach(table => {
+          const rows = table.tBodies[0]?.rows || table.querySelectorAll('tr');
+          Array.from(rows).forEach(row => {
+            const cols = row.cells;
+            if (!cols || cols.length < 3) return;
+            const nome = cols[0].textContent.toLowerCase();
+            const email = cols[1].textContent.toLowerCase();
+            const cpf = cols[2].textContent.toLowerCase();
+            row.style.display = (nome.includes(filter) || email.includes(filter) || cpf.includes(filter)) ? '' : 'none';
+          });
+        });
+      });
+    });
+    </script>
+    ";
+
+    // Função de renderização de linhas com mapeamento de parcelas
     $render_row = function( $sub, $payments ) use ( $agora, $expiredStatuses ) {
         $totalInstallments = ! empty( $sub['installments'] ) ? (int) $sub['installments'] : 6;
-        $countPaid = $countOverdue = 0;
+        // Cria slots vazios e preenche
+        $installments = array_fill(0, $totalInstallments, null);
         foreach ( $payments as $p ) {
-            $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
-            $due    = strtotime( $p['dueDate'] ?? '' );
-            if ( $p_stat === 'PAYED' ) {
-                $countPaid++;
-            } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due && $due < $agora && $p_stat !== 'PAYED' ) ) {
-                $countOverdue++;
+            $idx = isset( $p['installmentNumber'] ) ? (int)$p['installmentNumber'] - 1 : null;
+            if ( $idx === null || $idx < 0 || $idx >= $totalInstallments ) {
+                $idx = array_search( null, $installments, true );
+            }
+            if ( $idx !== false ) {
+                $installments[ $idx ] = $p;
             }
         }
-        $countFuture = max(0, $totalInstallments - $countPaid - $countOverdue);
+
+        // Contagem de pagas e atrasadas
+        $countPaid = $countOverdue = 0;
+        foreach ( $installments as $p ) {
+            if ( $p ) {
+                $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
+                $due    = strtotime( $p['dueDate'] ?? '' );
+                if ( $p_stat === 'PAYED' ) {
+                    $countPaid++;
+                } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due && $due < $agora && $p_stat !== 'PAYED' ) ) {
+                    $countOverdue++;
+                }
+            }
+        }
+        $countFuture = max( 0, $totalInstallments - $countPaid - $countOverdue );
 
         $r  = '<tr>';
         $r .= '<td>'. esc_html( $sub['customer_name'] ?? '—' ) .'</td>';
         $r .= '<td>'. esc_html( $sub['customer_email'] ?? '—' ) .'</td>';
         $r .= '<td>'. esc_html( $sub['cpf'] ?? '—' ) .'</td>';
-        $r .= '<td>';            
+        $r .= '<td>';
+        $r .= '<div class="debug-info">ID do Produto: '. esc_html( $sub['subscriptionID'] ?? '—' ). '</div>';
         $r .= "<div class='debug-info'>{$countPaid} pagas<br>{$countOverdue} atrasadas<br>{$countFuture} futuras</div>";
 
-        // loop com tooltip
-        for ( $i = 0; $i < $totalInstallments; $i++ ) {
-            // define dados
-            if ( isset( $payments[ $i ] ) ) {
-                $p       = $payments[ $i ];
+        // Renderiza cada parcelinha
+        foreach ( $installments as $i => $p ) {
+            if ( $p ) {
                 $val     = number_format( $p['value'], 2, ',', '.' );
-                $created = date_i18n('d/m/Y - H:i', strtotime( $p['created'] ??''));
-                $p_stat  = strtoupper($p['paymentStatus'] ?? '');
-                $due_ts  = strtotime($p['dueDate'] ?? '');
+                $created_raw = $p['created'] ?? $p['createdAt'] ?? '';
+                $created = date_i18n('d/m/Y - H:i', strtotime( $created_raw ));
+                $p_stat  = strtoupper( $p['paymentStatus'] ?? '' );
+                $due_ts  = strtotime( $p['dueDate'] ?? '' );
                 if ( $p_stat === 'PAYED' ) {
-                    $paid_at = date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? ''));
-                    $pag     = $paid_at;
-                } elseif ( in_array($p_stat,['OVERDUE','INACTIVE'],true) || ($due_ts && $due_ts < $agora && $p_stat!=='PAYED') ) {
+                    $pag = date_i18n('d/m/Y', strtotime( $p['paymentDate'] ?? '' ));
+                } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due_ts && $due_ts < $agora && $p_stat !== 'PAYED' ) ) {
                     $pag = 'ATRASADA';
                 } else {
                     $pag = '—';
                 }
                 $tooltip = "Valor: R$ {$val}\nCriação: {$created}\nPagamento: {$pag}";
+                $cls = $i < $countPaid ? 'paid' : ( $i < $countPaid + $countOverdue ? 'overdue' : 'future' );
             } else {
                 $tooltip = 'Parcela não criada';
-            }
-            // classe de cor
-            if ( $i < $countPaid ) {
-                $cls = 'paid';
-            } elseif ( $i < $countPaid + $countOverdue ) {
-                $cls = 'overdue';
-            } else {
-                $cls = 'future';
+                $cls     = 'future';
             }
             $r .= '<span class="status-box '. esc_attr($cls) .'" data-tooltip="'. esc_attr($tooltip) .'"></span>';
         }
@@ -170,20 +217,35 @@ function mostrar_dashboard_assinantes() {
         $r .= '</td>';
         $r .= '<td>';
         $stat = strtoupper(trim($sub['status'] ?? ''));
+
+// Status cancelados continuam iguais
         if ( in_array($stat, $expiredStatuses, true) ) {
             $date = $sub['cancelled_at'] ?? $sub['cancelledAt'] ?? $sub['canceledAt'] ?? $sub['expiredAt'] ?? $sub['updated'] ?? '';
             $r .= $date ? 'Cancelado em ' . date_i18n('d/m/Y', strtotime($date)) : 'Cancelado';
+
         } else {
-            $r .= ucfirst(strtolower($sub['status'] ?? '—'));
-        }
+            // Tradução de ACTIVE e INACTIVE
+            switch ( $stat ) {
+                case 'ACTIVE':
+                    $label = 'Ativo';
+                    break;
+                case 'INACTIVE':
+                    $label = 'Inativo';
+                    break;
+                default:
+                    $label = ucfirst( strtolower( $sub['status'] ?? '—' ) );
+            }
+    $r .= $label;
+}
+
         $r .= '</td></tr>';
         return $r;
     };
 
     // Monta tabelas por categoria
-    foreach ([ 'em_dia'=>'Em Dia','em_atraso'=>'Em Atraso','canceladas'=>'Canceladas'] as $key=>$titulo) {
+    foreach ([ 'em_atraso'=>'Em Atraso', 'em_dia'=>'Em Dia', 'canceladas'=>'Canceladas'] as $key=>$titulo) {
         $html .= "<h3>Assinaturas — {$titulo}</h3>";
-        $html .= "<table class='dash-table'><thead><tr><th>Nome</th><th>E‑mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
+        $html .= "<table class='dash-table'><thead><tr><th>Nome</th><th>E‑mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></thead><tbody>";
         if ( empty($grupos[$key]) ) {
             $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
         } else {
@@ -197,4 +259,3 @@ function mostrar_dashboard_assinantes() {
     return $html;
 }
 add_shortcode('dashboard_assinantes_e_pedidos','mostrar_dashboard_assinantes');
-
