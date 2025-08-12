@@ -152,95 +152,117 @@ function mostrar_dashboard_assinantes() {
     </script>
     ";
 
-    // Função de renderização de linhas com mapeamento de parcelas
-    $render_row = function( $sub, $payments ) use ( $agora, $expiredStatuses ) {
-        $totalInstallments = ! empty( $sub['installments'] ) ? (int) $sub['installments'] : 6;
-        // Cria slots vazios e preenche
-        $installments = array_fill(0, $totalInstallments, null);
-        foreach ( $payments as $p ) {
-            $idx = isset( $p['installmentNumber'] ) ? (int)$p['installmentNumber'] - 1 : null;
-            if ( $idx === null || $idx < 0 || $idx >= $totalInstallments ) {
-                $idx = array_search( null, $installments, true );
-            }
-            if ( $idx !== false ) {
-                $installments[ $idx ] = $p;
-            }
-        }
+// Função de renderização de linhas com mapeamento de parcelas
+$render_row = function( $sub, $payments ) use ( $agora, $expiredStatuses ) {
+    $totalInstallments = 6; // fallback padrão
 
-        // Contagem de pagas e atrasadas
-        $countPaid = $countOverdue = 0;
-        foreach ( $installments as $p ) {
-            if ( $p ) {
-                $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
-                $due    = strtotime( $p['dueDate'] ?? '' );
-                if ( $p_stat === 'PAYED' ) {
-                    $countPaid++;
-                } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due && $due < $agora && $p_stat !== 'PAYED' ) ) {
-                    $countOverdue++;
+    // === NOVA LÓGICA: buscar o número de parcelas do produto no WooCommerce ===
+    if ( function_exists( 'wcs_get_subscriptions_for_order' ) && ! empty( $sub['order_id'] ) ) {
+        // Busca as assinaturas do WooCommerce vinculadas ao pedido original
+        $subs_wc = wcs_get_subscriptions_for_order( $sub['order_id'], [ 'order_type' => 'parent' ] );
+        if ( ! empty( $subs_wc ) ) {
+            $woo_subscription = reset( $subs_wc );
+            if ( $woo_subscription && is_a( $woo_subscription, 'WC_Subscription' ) ) {
+                $items = $woo_subscription->get_items();
+                if ( ! empty( $items ) ) {
+                    $item       = reset( $items );
+                    $product_id = $item->get_product_id();
+
+                    if ( function_exists( 'WC_Subscriptions_Product::get_length' ) || method_exists( 'WC_Subscriptions_Product', 'get_length' ) ) {
+                        $length = \WC_Subscriptions_Product::get_length( $product_id );
+                        if ( $length > 0 ) {
+                            $totalInstallments = (int) $length;
+                        }
+                    }
                 }
             }
         }
-        $countFuture = max( 0, $totalInstallments - $countPaid - $countOverdue );
+    }
+    // ==========================================================================
 
-        $r  = '<tr>';
-        $r .= '<td>'. esc_html( $sub['customer_name'] ?? '—' ) .'</td>';
-        $r .= '<td>'. esc_html( $sub['customer_email'] ?? '—' ) .'</td>';
-        $r .= '<td>'. esc_html( $sub['cpf'] ?? '—' ) .'</td>';
-        $r .= '<td>';
-        $r .= '<div class="debug-info">ID do Produto: '. esc_html( $sub['subscriptionID'] ?? '—' ). '</div>';
-        $r .= "<div class='debug-info'>{$countPaid} pagas<br>{$countOverdue} atrasadas<br>{$countFuture} futuras</div>";
+    // Cria slots vazios e preenche
+    $installments = array_fill(0, $totalInstallments, null);
+    foreach ( $payments as $p ) {
+        $idx = isset( $p['installmentNumber'] ) ? (int)$p['installmentNumber'] - 1 : null;
+        if ( $idx === null || $idx < 0 || $idx >= $totalInstallments ) {
+            $idx = array_search( null, $installments, true );
+        }
+        if ( $idx !== false ) {
+            $installments[ $idx ] = $p;
+        }
+    }
 
-        // Renderiza cada parcelinha
-        foreach ( $installments as $i => $p ) {
-            if ( $p ) {
-                $val     = number_format( $p['value'], 2, ',', '.' );
-                $created_raw = $p['created'] ?? $p['createdAt'] ?? '';
-                $created = date_i18n('d/m/Y - H:i', strtotime( $created_raw ));
-                $p_stat  = strtoupper( $p['paymentStatus'] ?? '' );
-                $due_ts  = strtotime( $p['dueDate'] ?? '' );
-                if ( $p_stat === 'PAYED' ) {
-                    $pag = date_i18n('d/m/Y', strtotime( $p['paymentDate'] ?? '' ));
-                } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due_ts && $due_ts < $agora && $p_stat !== 'PAYED' ) ) {
-                    $pag = 'ATRASADA';
-                } else {
-                    $pag = '—';
-                }
-                $tooltip = "Valor: R$ {$val}\nCriação: {$created}\nPagamento: {$pag}";
-                $cls = $i < $countPaid ? 'paid' : ( $i < $countPaid + $countOverdue ? 'overdue' : 'future' );
+    // Contagem de pagas e atrasadas
+    $countPaid = $countOverdue = 0;
+    foreach ( $installments as $p ) {
+        if ( $p ) {
+            $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
+            $due    = strtotime( $p['dueDate'] ?? '' );
+            if ( $p_stat === 'PAYED' ) {
+                $countPaid++;
+            } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due && $due < $agora && $p_stat !== 'PAYED' ) ) {
+                $countOverdue++;
+            }
+        }
+    }
+    $countFuture = max( 0, $totalInstallments - $countPaid - $countOverdue );
+
+    $r  = '<tr>';
+    $r .= '<td>'. esc_html( $sub['customer_name'] ?? '—' ) .'</td>';
+    $r .= '<td>'. esc_html( $sub['customer_email'] ?? '—' ) .'</td>';
+    $r .= '<td>'. esc_html( $sub['cpf'] ?? '—' ) .'</td>';
+    $r .= '<td>';
+    $r .= '<div class="debug-info">ID do Produto: '. esc_html( $sub['subscriptionID'] ?? '—' ). '</div>';
+    $r .= "<div class='debug-info'>{$countPaid} pagas<br>{$countOverdue} atrasadas<br>{$countFuture} futuras</div>";
+
+    // Renderiza cada parcelinha
+    foreach ( $installments as $i => $p ) {
+        if ( $p ) {
+            $val     = number_format( $p['value'], 2, ',', '.' );
+            $created_raw = $p['created'] ?? $p['createdAt'] ?? '';
+            $created = date_i18n('d/m/Y - H:i', strtotime( $created_raw ));
+            $p_stat  = strtoupper( $p['paymentStatus'] ?? '' );
+            $due_ts  = strtotime( $p['dueDate'] ?? '' );
+            if ( $p_stat === 'PAYED' ) {
+                $pag = date_i18n('d/m/Y', strtotime( $p['paymentDate'] ?? '' ));
+            } elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due_ts && $due_ts < $agora && $p_stat !== 'PAYED' ) ) {
+                $pag = 'ATRASADA';
             } else {
-                $tooltip = 'Parcela não criada';
-                $cls     = 'future';
+                $pag = '—';
             }
-            $r .= '<span class="status-box '. esc_attr($cls) .'" data-tooltip="'. esc_attr($tooltip) .'"></span>';
-        }
-
-        $r .= '</td>';
-        $r .= '<td>';
-        $stat = strtoupper(trim($sub['status'] ?? ''));
-
-// Status cancelados continuam iguais
-        if ( in_array($stat, $expiredStatuses, true) ) {
-            $date = $sub['cancelled_at'] ?? $sub['cancelledAt'] ?? $sub['canceledAt'] ?? $sub['expiredAt'] ?? $sub['updated'] ?? '';
-            $r .= $date ? 'Cancelado em ' . date_i18n('d/m/Y', strtotime($date)) : 'Cancelado';
-
+            $tooltip = "Valor: R$ {$val}\nCriação: {$created}\nPagamento: {$pag}";
+            $cls = $i < $countPaid ? 'paid' : ( $i < $countPaid + $countOverdue ? 'overdue' : 'future' );
         } else {
-            // Tradução de ACTIVE e INACTIVE
-            switch ( $stat ) {
-                case 'ACTIVE':
-                    $label = 'Ativo';
-                    break;
-                case 'INACTIVE':
-                    $label = 'Inativo';
-                    break;
-                default:
-                    $label = ucfirst( strtolower( $sub['status'] ?? '—' ) );
-            }
-    $r .= $label;
-}
+            $tooltip = 'Parcela não criada';
+            $cls     = 'future';
+        }
+        $r .= '<span class="status-box '. esc_attr($cls) .'" data-tooltip="'. esc_attr($tooltip) .'"></span>';
+    }
 
-        $r .= '</td></tr>';
-        return $r;
-    };
+    $r .= '</td>';
+    $r .= '<td>';
+    $stat = strtoupper(trim($sub['status'] ?? ''));
+
+    if ( in_array($stat, $expiredStatuses, true) ) {
+        $date = $sub['cancelled_at'] ?? $sub['cancelledAt'] ?? $sub['canceledAt'] ?? $sub['expiredAt'] ?? $sub['updated'] ?? '';
+        $r .= $date ? 'Cancelado em ' . date_i18n('d/m/Y', strtotime($date)) : 'Cancelado';
+    } else {
+        switch ( $stat ) {
+            case 'ACTIVE':
+                $label = 'Ativo';
+                break;
+            case 'INACTIVE':
+                $label = 'Inativo';
+                break;
+            default:
+                $label = ucfirst( strtolower( $sub['status'] ?? '—' ) );
+        }
+        $r .= $label;
+    }
+
+    $r .= '</td></tr>';
+    return $r;
+};
 
     // Monta tabelas por categoria
     foreach ([ 'em_atraso'=>'Em Atraso', 'em_dia'=>'Em Dia', 'canceladas'=>'Canceladas'] as $key=>$titulo) {
@@ -258,4 +280,5 @@ function mostrar_dashboard_assinantes() {
 
     return $html;
 }
+
 add_shortcode('dashboard_assinantes_e_pedidos','mostrar_dashboard_assinantes');
