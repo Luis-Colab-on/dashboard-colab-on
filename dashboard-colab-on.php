@@ -33,9 +33,7 @@ function fetch_all_asaas_subscriptions() {
 
 /**
  * 2) Busca todas as parcelas de assinatura na tabela de pagamentos
- *    - Ordena por dueDate/created
- *    - Remove linhas com status "refunded"
- *    - Deduplica por installmentNumber (mantém a melhor linha: paga > atrasada > futura; em empate, a mais recente)
+ *    Ordenadas pelas datas mais antigas primeiro
  */
 function fetch_asaas_subscription_payments( $subscriptionID ) {
     global $wpdb;
@@ -45,272 +43,138 @@ function fetch_asaas_subscription_payments( $subscriptionID ) {
         "
         SELECT *
         FROM {$payments_table}
-        WHERE type = %s
+        WHERE `type` = %s
           AND orderID = %s
+          
         ORDER BY dueDate ASC, created ASC
         ",
         'assinatura',
         $subscriptionID
     );
 
-    $rows  = $wpdb->get_results( $sql, ARRAY_A );
-    $now   = time();
-
-    // 1) filtra REFUNDED
-    $rows = array_values(array_filter($rows, function($r){
-        return !_asaas_is_refunded_payment($r);
-    }));
-
-    // 2) dedup por installmentNumber (mantém a "melhor" linha)
-    $byInstallment = [];
-    $noIndex       = []; // quando não houver installmentNumber
-
-    foreach ($rows as $r) {
-        $idx = isset($r['installmentNumber']) ? (int)$r['installmentNumber'] - 1 : null;
-
-        // score: paid > overdue > future
-        $p_stat = strtoupper($r['paymentStatus'] ?? '');
-        $due_ts = !empty($r['dueDate']) ? strtotime($r['dueDate']) : 0;
-
-        $is_paid    = ($p_stat === 'PAYED' || $p_stat === 'PAID' || $p_stat === 'RECEIVED' || $p_stat === 'CONFIRMED' || $p_stat === 'RECEIVED_IN_CASH');
-        $is_overdue = (!$is_paid) && ( ($due_ts && $due_ts < $now) || ($p_stat === 'OVERDUE' || $p_stat === 'INACTIVE') );
-
-        $score = $is_paid ? 3 : ($is_overdue ? 2 : 1);
-        $ts    = 0;
-        if (!empty($r['updated']))   $ts = max($ts, strtotime($r['updated']));
-        if (!empty($r['createdAt'])) $ts = max($ts, strtotime($r['createdAt']));
-        if (!empty($r['created']))   $ts = max($ts, strtotime($r['created']));
-
-        $r['_score'] = $score;
-        $r['_ts']    = $ts;
-
-        if ($idx === null || $idx < 0) {
-            $noIndex[] = $r;
-        } else {
-            if (!isset($byInstallment[$idx])) {
-                $byInstallment[$idx] = $r;
-            } else {
-                $best = $byInstallment[$idx];
-                if ($r['_score'] > $best['_score'] || ($r['_score'] === $best['_score'] && $r['_ts'] > $best['_ts'])) {
-                    $byInstallment[$idx] = $r;
-                }
-            }
-        }
-    }
-
-    ksort($byInstallment, SORT_NUMERIC);
-
-    // retorna deduplicados; os sem índice vão por último (serão alocados nos "slots" livres pelo render)
-    return array_values(array_merge($byInstallment, $noIndex));
+    return $wpdb->get_results( $sql, ARRAY_A );
 }
 
 
-/** ===================== Helpers ===================== */
-
-/** Status pagos/atrasados (cobre variações comuns do Asaas) */
-function _asaas_is_paid_status( $status ) {
-    $st = strtoupper( trim( (string) $status ) );
-    $paid_statuses = [ 'PAYED', 'PAID', 'RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH' ];
-    return in_array( $st, $paid_statuses, true );
-}
-function _asaas_is_overdue_status( $status ) {
-    $st = strtoupper( trim( (string) $status ) );
-    return in_array( $st, [ 'OVERDUE', 'INACTIVE' ], true );
-}
-
-/** Extrai o título real do produto após "Assinatura #1234 - " */
-function mpda_extract_title_from_description( $desc ) {
-    if ( ! $desc ) return '';
-    $raw = trim( wp_strip_all_tags( (string) $desc ) );
-    if ( preg_match( '/^\s*assinatura\s*#?\s*\d+\s*-\s*(.+)$/i', $raw, $m ) ) {
-        return trim( $m[1] ); // tudo após o hífen
-    }
-    return $raw;
-}
+/** ========= HELPERS: produto → nº de ciclos ========= */
 
 /**
- * Acha product_id a partir do description (usando só o trecho depois do prefixo).
- * Tenta: título exato -> LIKE -> busca do Woo.
- * Retorna: ['product_id'=>int,'src'=>'description_title_exact|description_title_like|description_wc_search']
+ * Busca o product_id em wp_processa_pagamentos_asaas_subscriptions_items
+ * usando o ID da assinatura (s.id) na coluna subscription_table_id.
  */
-function mpda_find_product_id_from_description( $desc ) {
+function get_product_id_for_subscription_local( $subscription_table_id ) {
+    if ( empty( $subscription_table_id ) ) return 0;
+
     static $cache = [];
-    $title = mpda_extract_title_from_description( $desc );
-    $key   = md5( strtolower( $title ) );
-    if ( isset( $cache[ $key ] ) ) return $cache[ $key ];
-
-    $ret = [ 'product_id' => 0, 'src' => null ];
-    if ( $title === '' ) return $cache[ $key ] = $ret;
-
-    // 1) título exato
-    $post = get_page_by_title( $title, OBJECT, 'product' );
-    if ( $post ) {
-        return $cache[ $key ] = [ 'product_id' => (int) $post->ID, 'src' => 'description_title_exact' ];
+    if ( isset( $cache[ $subscription_table_id ] ) ) {
+        return $cache[ $subscription_table_id ];
     }
 
-    // 2) LIKE
     global $wpdb;
-    $pid = $wpdb->get_var( $wpdb->prepare(
-        "SELECT ID
-         FROM {$wpdb->posts}
-         WHERE post_type='product'
-           AND post_status IN('publish','private')
-           AND post_title LIKE %s
-         ORDER BY (post_title=%s) DESC, CHAR_LENGTH(post_title) ASC
-         LIMIT 1",
-        '%' . $wpdb->esc_like( $title ) . '%', $title
+    $items_table = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions_items';
+
+    // *** AQUI O AJUSTE PRINCIPAL ***
+    $product_id = (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT product_id FROM {$items_table} WHERE subscription_table_id = %d LIMIT 1",
+        (int) $subscription_table_id
     ) );
-    if ( $pid ) {
-        return $cache[ $key ] = [ 'product_id' => (int) $pid, 'src' => 'description_title_like' ];
-    }
 
-    // 3) Fallback: busca por s=
-    if ( function_exists( 'wc_get_products' ) ) {
-        $ids = wc_get_products( [ 'limit' => 1, 'status' => [ 'publish','private' ], 's' => $title, 'return' => 'ids' ] );
-        if ( ! empty( $ids ) ) {
-            return $cache[ $key ] = [ 'product_id' => (int) $ids[0], 'src' => 'description_wc_search' ];
-        }
-    }
+    $cache[ $subscription_table_id ] = $product_id;
+    return $product_id;
+}
 
-    return $cache[ $key ] = $ret;
+/** Se o product_id for variação, devolve o ID do produto pai */
+function maybe_get_parent_product_id_local( $product_id ) {
+    if ( ! function_exists( 'wc_get_product' ) || ! $product_id ) return (int) $product_id;
+    $p = wc_get_product( $product_id );
+    if ( $p && $p->is_type( 'variation' ) ) {
+        $parent_id = $p->get_parent_id();
+        return $parent_id ? (int) $parent_id : (int) $product_id;
+    }
+    return (int) $product_id;
 }
 
 /**
- * Descobre dinamicamente o total de parcelas/meses e a fonte.
- * Ordem:
- * 1) Woo Subscriptions (length do produto, se houver order_id ligado)
- * 2) Meta do produto (_subscription_length, etc.)
- * 3) Produto via description -> length/meta
- * 4) Campos da própria assinatura (total_installments/installments/parcelas/months/duration)
- * 5) Pelos pagamentos (max installmentNumber, senão count)
- * Retorna: ['total'=>int,'product_id'=>int,'source'=>string,'source_meta'=>string|null]
+ * Obtém nº de ciclos/meses do produto de assinatura no WooCommerce.
+ * Retorna:
+ *   > 0  => nº de ciclos definido
+ *   = 0  => sem término
+ *   null => desconhecido
  */
-function mpda_guess_total_installments( array $sub, array $payments ) {
-    $result = [
-        'total'      => null,
-        'product_id' => 0,
-        'source'     => 'fallback',
-        'source_meta'=> null,
-    ];
-    $meta_keys = [ '_subscription_length', '_billing_length', 'assinatura_meses', 'numero_de_meses', 'duracao_meses' ];
+function get_subscription_cycles_from_product( $product_id ) {
+    if ( ! $product_id ) return null;
 
-    // 1) Woo Subscriptions (se você tiver esse vínculo por order_id)
-    if ( function_exists( 'wcs_get_subscriptions_for_order' ) && ! empty( $sub['order_id'] ) ) {
-        $subs_wc = wcs_get_subscriptions_for_order( $sub['order_id'], [ 'order_type' => 'parent' ] );
-        if ( ! empty( $subs_wc ) ) {
-            $woo_subscription = reset( $subs_wc );
-            if ( $woo_subscription && is_a( $woo_subscription, 'WC_Subscription' ) ) {
-                $items = $woo_subscription->get_items();
-                if ( ! empty( $items ) ) {
-                    $item                 = reset( $items );
-                    $result['product_id'] = (int) $item->get_product_id();
-                    if ( class_exists( 'WC_Subscriptions_Product' ) && method_exists( 'WC_Subscriptions_Product', 'get_length' ) ) {
-                        $length = \WC_Subscriptions_Product::get_length( $result['product_id'] );
-                        if ( is_numeric( $length ) && (int) $length > 0 ) {
-                            $result['total']  = (int) $length;
-                            $result['source'] = 'wc_subscriptions_length';
-                        }
-                    }
-                }
+    static $cache = [];
+    if ( isset( $cache[ $product_id ] ) ) return $cache[ $product_id ];
+
+    $length = null;
+    $base_id = maybe_get_parent_product_id_local( $product_id );
+
+    // 1) Woo Subscriptions (se ativo)
+    if ( function_exists( 'wc_get_product' ) && class_exists( 'WC_Subscriptions_Product' ) ) {
+        try {
+            $product_obj = wc_get_product( $base_id );
+            if ( $product_obj ) {
+                $len = \WC_Subscriptions_Product::get_length( $product_obj ); // 0=open-ended, >0=nº ciclos
+                if ( $len !== null && $len !== '' ) $length = (int) $len;
             }
+        } catch ( \Throwable $e ) { /* fallback abaixo */ }
+    }
+
+    // 2) Metas comuns
+    if ( $length === null ) {
+        $meta_keys = [ '_subscription_length', '_billing_cycles', 'subscription_length', 'assinatura_meses', 'assinatura_parcelas' ];
+        foreach ( $meta_keys as $k ) {
+            $v = get_post_meta( $base_id, $k, true );
+            if ( $v !== '' && $v !== null ) { $length = (int) $v; break; }
         }
     }
 
-    // 2) Meta do produto — se já tiver product_id
-    if ( ! $result['total'] && $result['product_id'] ) {
-        foreach ( $meta_keys as $mk ) {
-            $v = get_post_meta( $result['product_id'], $mk, true );
-            if ( $v !== '' && is_numeric( $v ) && (int) $v > 0 ) {
-                $result['total']      = (int) $v;
-                $result['source']     = 'product_meta:' . $mk;
-                $result['source_meta']= $mk;
-                break;
-            }
+    // 3) Regex em título/descrição (ex.: “6 meses”, “12x”)
+    if ( $length === null && function_exists( 'wc_get_product' ) ) {
+        $p = wc_get_product( $base_id );
+        if ( $p ) {
+            $blob = ' ' . $p->get_name() . ' ';
+            if ( method_exists( $p, 'get_short_description' ) ) $blob .= ' ' . $p->get_short_description();
+            if ( method_exists( $p, 'get_description' ) )       $blob .= ' ' . $p->get_description();
+            if ( preg_match( '/\b(\d{1,2})\s*mes(?:es)?\b/i', $blob, $m ) ) $length = (int) $m[1];
+            if ( $length === null && preg_match( '/\b(\d{1,2})\s*x\b/i', $blob, $m2 ) ) $length = (int) $m2[1];
         }
     }
 
-    // 3) Produto via description -> tenta length/meta
-    if ( ! $result['total'] && ! $result['product_id'] ) {
-        $found = mpda_find_product_id_from_description( $sub['description'] ?? '' );
-        if ( $found['product_id'] ) {
-            $result['product_id'] = (int) $found['product_id'];
-            $result['source']     = 'description_map:' . $found['src'];
-
-            if ( class_exists( 'WC_Subscriptions_Product' ) && method_exists( 'WC_Subscriptions_Product', 'get_length' ) ) {
-                $length = \WC_Subscriptions_Product::get_length( $result['product_id'] );
-                if ( is_numeric( $length ) && (int) $length > 0 ) {
-                    $result['total'] = (int) $length; // mantém fonte description_map:*
-                }
-            }
-            if ( ! $result['total'] ) {
-                foreach ( $meta_keys as $mk ) {
-                    $v = get_post_meta( $result['product_id'], $mk, true );
-                    if ( $v !== '' && is_numeric( $v ) && (int) $v > 0 ) {
-                        $result['total']      = (int) $v;
-                        $result['source']    .= ' + product_meta:' . $mk;
-                        $result['source_meta']= $mk;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // 4) Campos próprios da assinatura (se existirem)
-    if ( ! $result['total'] ) {
-        foreach ( [ 'total_installments', 'installments', 'parcelas', 'months', 'duration' ] as $pf ) {
-            if ( isset( $sub[ $pf ] ) && is_numeric( $sub[ $pf ] ) && (int) $sub[ $pf ] > 0 ) {
-                $result['total']  = (int) $sub[ $pf ];
-                $result['source'] = 'subscription_field:' . $pf;
-                break;
-            }
-        }
-    }
-
-    // 5) Deriva pelos pagamentos
-    if ( ! $result['total'] ) {
-        $max_install = 0;
-        foreach ( $payments as $p ) {
-            if ( isset( $p['installmentNumber'] ) && is_numeric( $p['installmentNumber'] ) ) {
-                $max_install = max( $max_install, (int) $p['installmentNumber'] );
-            }
-        }
-        if ( $max_install > 0 ) {
-            $result['total']  = $max_install;
-            $result['source'] = 'payments:max_installmentNumber';
-        } else {
-            $result['total']  = max( 1, (int) count( $payments ) );
-            $result['source'] = 'payments:count';
-        }
-    }
-
-    // Clamp + filtro
-    $result['total'] = max( 1, min( (int) $result['total'], 60 ) );
-    $result['total'] = (int) apply_filters( 'mpda_total_installments', $result['total'], $sub, $payments, $result['product_id'] );
-
-    return $result;
+    $cache[ $product_id ] = $length;
+    return $length;
 }
 
-/** Ignora pagamentos reembolsados (status/refund) */
-function _asaas_is_refunded_payment( array $row ) : bool {
-    $a = strtoupper( trim( (string)($row['status'] ?? '') ) );
-    $b = strtoupper( trim( (string)($row['paymentStatus'] ?? '') ) );
+/** (Opcional) Infere nº de ciclos a partir de uma WC_Subscription ligada ao order_id */
+function get_cycles_from_wc_subscription_order( $order_id ) {
+    if ( empty( $order_id ) ) return null;
+    if ( ! function_exists( 'wcs_get_subscriptions_for_order' ) || ! function_exists( 'wcs_estimate_periods_between' ) ) return null;
 
-    // considera qualquer ocorrência de "REFUND" (ex.: REFUNDED) em status ou paymentStatus
-    if (strpos($a, 'REFUND') !== false || strpos($b, 'REFUND') !== false) {
-        return true;
+    $subs_wc = wcs_get_subscriptions_for_order( $order_id, [ 'order_type' => 'parent' ] );
+    if ( empty( $subs_wc ) || ! is_array( $subs_wc ) ) return null;
+
+    $wc_sub = reset( $subs_wc );
+    if ( ! $wc_sub || ! is_a( $wc_sub, 'WC_Subscription' ) ) return null;
+
+    $end    = (int) $wc_sub->get_time( 'end' );      // 0 => sem fim
+    $period = $wc_sub->get_billing_period();         // 'day','week','month','year'
+    if ( $end <= 0 || empty( $period ) ) return 0;
+
+    $trial_end   = (int) $wc_sub->get_time( 'trial_end' );
+    if ( class_exists( 'WC_Subscriptions_Synchroniser' ) && method_exists( 'WC_Subscriptions_Synchroniser', 'subscription_contains_synced_product' ) &&
+         \WC_Subscriptions_Synchroniser::subscription_contains_synced_product( $wc_sub->get_id() ) ) {
+        $length_from = (int) $wc_sub->get_time( 'next_payment' );
+    } else {
+        $length_from = $trial_end > 0 ? $trial_end : (int) $wc_sub->get_time( 'start' );
     }
-    // (opcional) trate chargeback como reembolso também
-    // if (strpos($a, 'CHARGEBACK') !== false || strpos($b, 'CHARGEBACK') !== false) return true;
 
-    return false;
+    $cycles = (int) wcs_estimate_periods_between( $length_from, $end, $period );
+    return ( $cycles >= 0 ) ? $cycles : null;
 }
-
-
-/** ===================== UI ===================== */
 
 /**
- * 3) Monta o HTML do dashboard, com tooltips nas parcelas
+ * 3) Monta o HTML do dashboard
  */
 function mostrar_dashboard_assinantes() {
     $subs  = fetch_all_asaas_subscriptions();
@@ -324,10 +188,14 @@ function mostrar_dashboard_assinantes() {
     $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
     $overdueStatuses = ['OVERDUE','INACTIVE'];
 
-    // Classifica em grupos
     foreach ( $subs as $sub ) {
         $stat_raw = strtoupper( trim( $sub['status'] ?? '' ) );
-        $payments = fetch_asaas_subscription_payments( $sub['subscriptionID'] );
+        $payments = fetch_asaas_subscription_payments( $sub['subscriptionID'] ?? '' );
+        // Ignora parcelas reembolsadas (status = refunded)
+        $payments = array_values(array_filter($payments, function($p){
+            return strtolower(trim($p['status'] ?? '')) !== 'refunded';
+        }));
+
 
         if ( in_array( $stat_raw, $expiredStatuses, true ) ) {
             $grupos['canceladas'][] = compact( 'sub', 'payments' );
@@ -338,10 +206,11 @@ function mostrar_dashboard_assinantes() {
         if ( ! $hasOverdue ) {
             foreach ( $payments as $p ) {
                 $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
-                $due_ts = ! empty( $p['dueDate'] ) ? strtotime( $p['dueDate'] ) : false;
-                $is_paid    = _asaas_is_paid_status( $p_stat );
-                $is_overdue = ( ! $is_paid ) && ( ( $due_ts && $due_ts < $agora ) || _asaas_is_overdue_status( $p_stat ) );
-                if ( $is_overdue ) { $hasOverdue = true; break; }
+                $due    = strtotime( $p['dueDate'] ?? '' );
+                $mapPaid = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
+                if ( ! in_array( $p_stat, $mapPaid, true ) && ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due && $due < $agora ) ) ) {
+                    $hasOverdue = true; break;
+                }
             }
         }
 
@@ -349,7 +218,7 @@ function mostrar_dashboard_assinantes() {
         $grupos[ $key ][] = compact( 'sub', 'payments' );
     }
 
-    // CSS com tooltips
+    // CSS
     $html = '<style>
   .dash-table { width:100%; border-collapse:collapse; margin-bottom:2em; font-family:"Helvetica Neue",Arial,sans-serif; font-size:0.95em; color:#333; box-shadow:0 2px 6px rgba(0,0,0,0.1); border-radius:6px; overflow:hidden; }
   .dash-table th, .dash-table td { padding:12px 8px; text-align:center; border:2px solid #777; }
@@ -362,188 +231,160 @@ function mostrar_dashboard_assinantes() {
   .status-box.paid { background:#28a745; border-color:#1e7e34; }
   .status-box.overdue { background:#dc3545; border-color:#b21f2d; }
   .status-box.future { background:transparent; border-color:#6c757d; }
-  .status-box[data-tooltip]:hover::after { content:attr(data-tooltip); position:absolute; bottom:120%; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.75); color:#fff; padding:6px 8px; border-radius:4px; white-space:pre-line; font-size:0.8em; z-index:10; pointer-events:none; width: 13rem;
-    text-align: start; }
+  .status-box[data-tooltip]:hover::after { content:attr(data-tooltip); position:absolute; bottom:120%; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.75); color:#fff; padding:6px 8px; border-radius:4px; white-space:pre-line; font-size:0.8em; z-index:10; pointer-events:none; width: 13rem; text-align: start; }
   .debug-info { display:block; margin-bottom:6px; font-size:0.8em; color:#555; text-align:left; white-space:normal; }
   #search-button {background-color: #005b96;color: white;border: none;cursor: pointer;font-size: 16px;}
   #search-button:hover {background-color: #003f7c;}
-  .debug-info strong {
-    font-size: 1em;
-    color: #333;
-    margin-top: 8px;
-}
-
-
+  .debug-info strong { font-size: 1em; color: #333; margin-top: 8px; }
 </style>';
 
-        // Campo de busca
+    // Busca
     $html .= '<div style="width:100%;">
-    <input
-        type="text"
-        id="search-assinantes"
-        placeholder="Buscar por nome, e-mail ou CPF…"
-        style="margin-bottom:12px;padding:6px;width:100%;max-width:400px;border-radius: 5px;border: 1px solid;"
-    >
+    <input type="text" id="search-assinantes"
+  placeholder="Buscar por nome, e-mail, CPF ou ID do curso (#123 ou id:123)…"
+  style="margin-bottom:12px;padding:6px;width:100%;max-width:400px;border-radius: 5px;border: 1px solid;">
     <button id="search-button" style="padding:6px 12px; margin-top: 10px; border-radius: 5px;">Buscar</button>
-</div>
-';
+</div>';
 
-    // Script de filtragem
-    $html .= "
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-    const input = document.getElementById('search-assinantes');
-    const button = document.getElementById('search-button'); // Novo botão de busca
-
-    // Função para normalizar a string removendo acentos e caracteres especiais
-    function normalizeString(str) {
-        return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); // Remove acentos e converte para minúsculas
-    }
-
-    // Função para remover pontos e traços de CPF
-    function normalizeCPF(cpf) {
-        return cpf.replace(/[^\d]/g, ''); // Remove qualquer caractere que não seja número
-    }
-
-    button.addEventListener('click', function() {
-        const filter = normalizeString(input.value.trim());
-
-        document.querySelectorAll('.dash-table').forEach(table => {
-            const rows = table.tBodies[0]?.rows || table.querySelectorAll('tr');
-            Array.from(rows).forEach(row => {
-                const cols = row.cells;
-                if (!cols || cols.length < 3) return;
-                
-                const nome = normalizeString(cols[0].textContent.toLowerCase());
-                const email = normalizeString(cols[1].textContent.toLowerCase());
-                const cpf = normalizeCPF(cols[2].textContent.toLowerCase());
-
-                // Mostra a linha se a busca corresponder a nome, email ou CPF
-                row.style.display = (nome.includes(filter) || email.includes(filter) || cpf.includes(filter)) ? '' : 'none';
-            });
-        });
+    $html .= "<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const input = document.getElementById('search-assinantes');
+  const button = document.getElementById('search-button');
+  function normalizeString(str){ return str.normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase(); }
+  function normalizeCPF(cpf){ return cpf.replace(/[^\\d]/g,''); }
+  function doFilter(){
+    const filter = normalizeString(input.value.trim());
+    document.querySelectorAll('.dash-table').forEach(table=>{
+      const tbody = table.tBodies[0];
+      const rows = tbody ? Array.from(tbody.rows) : [];
+      rows.forEach(row=>{
+        const c=row.cells; if(!c||c.length<3) return;
+        const nome=normalizeString(c[0].textContent||'');
+        const email=normalizeString(c[1].textContent||'');
+        const cpf=normalizeCPF((c[2].textContent||'').toLowerCase());
+        row.style.display=(nome.includes(filter)||email.includes(filter)||cpf.includes(filter))?'':'none';
+      });
     });
+  }
+  button.addEventListener('click', doFilter);
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter') doFilter(); });
 });
+</script>";
 
-    </script>
-    ";
+    // Render de linhas
+    $render_row = function( $sub, $payments ) use ( $agora ) {
 
-    // Função de renderização de linhas com mapeamento de parcelas (dinâmico)
-$render_row = function( $sub, $payments ) use ( $agora, $expiredStatuses ) {
+        // ===== número de boxes =====
+        $totalInstallments = 6; // fallback final
 
-    // Dinâmico: total de parcelas + product_id + fonte
-    $guess             = mpda_guess_total_installments( $sub, $payments );
-    $totalInstallments = $guess['total'];
-    $product_id        = $guess['product_id'];
-    $source            = $guess['source'];
+        // 1) product_id via items.subscription_table_id = s.id
+        $subscription_pk_id = (int) ( $sub['id'] ?? 0 );
+        $product_id         = get_product_id_for_subscription_local( $subscription_pk_id );
 
-    // Extrair o nome do curso da descrição
-    $course_name = mpda_extract_title_from_description($sub['description']);
+        $course_base_id     = maybe_get_parent_product_id_local( $product_id );
 
-    // Cria slots e preenche por installmentNumber (ou primeira posição livre)
-    $installments = array_fill( 0, $totalInstallments, null );
-    foreach ( $payments as $p ) {
-        $idx = isset( $p['installmentNumber'] ) ? ( (int) $p['installmentNumber'] - 1 ) : null;
-        if ( $idx === null || $idx < 0 || $idx >= $totalInstallments ) {
-            $idx = array_search( null, $installments, true );
-        }
-        if ( $idx !== false ) {
-            $installments[ $idx ] = $p;
-        }
-    }
-
-    // Contadores
-    $countPaid = $countOverdue = $countFuture = 0;
-
-    $r  = '<tr>';
-    $r .= '<td>'. esc_html( $sub['customer_name'] ?? '—' ) .'</td>';
-    $r .= '<td>'. esc_html( $sub['customer_email'] ?? '—' ) .'</td>';
-    $r .= '<td>'. esc_html( $sub['cpf'] ?? '—' ) .'</td>';
-    $r .= '<td>';
-
-    // Debugs
-    $r .= '<div class="debug-info">ID da Assinatura: '. esc_html( $sub['subscriptionID'] ?? '—' ) .'</div>';
-    $r .= '<div class="debug-info">ID do Produto (WooCommerce): '. esc_html( $product_id ?: '—' ) .'</div>';
-    $r .= '<div class="debug-info">Parcelas previstas: '. esc_html( $totalInstallments ) .' <small>(fonte: '. esc_html( $source ) .')</small></div>';
-
-    // Adicionar o nome do curso logo abaixo do debug
-    if (!empty($course_name)) {
-        $r .= '<div class="debug-info"><strong>Curso: </strong>' . esc_html($course_name) . '</div>';
-    }
-
-    // Renderiza as parcelas
-    foreach ( $installments as $p ) {
-        if ( $p ) {
-            $val = isset( $p['value'] ) ? number_format( (float) $p['value'], 2, ',', '.' ) : '0,00';
-
-            $created_raw = $p['created'] ?? $p['createdAt'] ?? '';
-            $created_ts  = $created_raw ? strtotime( $created_raw ) : false;
-            $created     = $created_ts ? date_i18n( 'd/m/Y - H:i', $created_ts ) : '—';
-
-            $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
-            $due_ts = ! empty( $p['dueDate'] ) ? strtotime( $p['dueDate'] ) : false;
-
-            $is_paid    = _asaas_is_paid_status( $p_stat );
-            $is_overdue = ( ! $is_paid ) && ( ( $due_ts && $due_ts < $agora ) || _asaas_is_overdue_status( $p_stat ) );
-
-            if ( $is_paid ) {
-                $pay_raw = $p['paymentDate'] ?? $p['confirmedDate'] ?? '';
-                $pay_ts  = $pay_raw ? strtotime( $pay_raw ) : false;
-                $pag     = $pay_ts ? date_i18n( 'd/m/Y', $pay_ts ) : '—';
-                $cls     = 'paid';
-                $countPaid++;
-            } elseif ( $is_overdue ) {
-                $pag     = 'ATRASADA';
-                $cls     = 'overdue';
-                $countOverdue++;
-            } else {
-                $pag     = '—';
-                $cls     = 'future';
-                $countFuture++;
+        // 2) tenta pelo produto (preferencial)
+        $cycles = null;
+        if ( $product_id ) {
+            $cycles = get_subscription_cycles_from_product( $product_id );
+            if ( $cycles !== null ) {
+                if ( $cycles > 0 ) $totalInstallments = (int) $cycles;
+                elseif ( $cycles === 0 ) $totalInstallments = max( count( $payments ), 6 );
             }
+        }
 
-            $tooltip = "Valor: R$ {$val}\nCriação: {$created}\nPagamento: {$pag}";
+        // 3) se não achou, tenta WC_Subscription via order_id
+        if ( ( ! $product_id || $cycles === null ) && ! empty( $sub['order_id'] ) ) {
+            $maybe_cycles = get_cycles_from_wc_subscription_order( $sub['order_id'] );
+            if ( $maybe_cycles !== null ) {
+                if ( $maybe_cycles > 0 ) $totalInstallments = (int) $maybe_cycles;
+                elseif ( $maybe_cycles === 0 ) $totalInstallments = max( count( $payments ), 6 );
+            }
+        }
+
+        // 4) nunca menos que o número de pagamentos já criados
+        if ( count( $payments ) > $totalInstallments ) $totalInstallments = count( $payments );
+
+        // ===== mapeia parcelas =====
+        $installments = array_fill(0, $totalInstallments, null);
+        foreach ( $payments as $p ) {
+            $idx = isset( $p['installmentNumber'] ) && is_numeric( $p['installmentNumber'] ) ? ((int)$p['installmentNumber'] - 1) : null;
+            if ( $idx === null || $idx < 0 || $idx >= $totalInstallments ) $idx = array_search( null, $installments, true );
+            if ( $idx !== false ) $installments[ $idx ] = $p;
+        }
+
+        // contagem por status
+        $countPaid = $countOverdue = 0;
+        $mapPaid = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
+        foreach ( $installments as $p ) {
+            if ( $p ) {
+                $p_stat = strtoupper( $p['paymentStatus'] ?? '' );
+                $due    = strtotime( $p['dueDate'] ?? '' );
+                if ( in_array( $p_stat, $mapPaid, true ) ) $countPaid++;
+                elseif ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due && $due < $agora ) ) $countOverdue++;
+            }
+        }
+        $countFuture = max( 0, $totalInstallments - $countPaid - $countOverdue );
+
+        // render
+        $r  = '<tr data-course-id="'. esc_attr( $product_id ?: '' ) .'" data-course-base-id="'. esc_attr( $course_base_id ?: '' ) .'">';
+        $r .= '<td>'. esc_html($sub['customer_name'] ?? '—') .
+            '<span style="display:none"> id:' . (int)$product_id . ' #' . (int)$product_id . ' ' . (int)$product_id . '</span></td>';
+        $r .= '<td>'. esc_html( $sub['customer_email'] ?? '—' ) .'</td>';
+        $r .= '<td>'. esc_html( $sub['cpf'] ?? '—' ) .'</td>';
+        $r .= '<td>';
+        $r .= '<div class="debug-info"><strong>Assinatura (s.id):</strong> '. ( $subscription_pk_id ?: '—' ) .'</div>';
+        $r .= '<div class="debug-info"><strong>Produto (ID):</strong> '. ( $product_id ?: '—' ) .'</div>';
+        $r .= '<div class="debug-info"><strong>Boxes:</strong> '. intval($totalInstallments) .'</div>';
+        $r .= "<div class='debug-info'>{$countPaid} pagas<br>{$countOverdue} atrasadas<br>{$countFuture} futuras</div>";
+
+        foreach ( $installments as $i => $p ) {
+            if ( $p ) {
+                $val         = isset( $p['value'] ) ? number_format( (float)$p['value'], 2, ',', '.' ) : '0,00';
+                $created_raw = $p['created'] ?? ( $p['createdAt'] ?? '' );
+                $created     = $created_raw ? date_i18n('d/m/Y - H:i', strtotime($created_raw)) : '—';
+                $p_stat      = strtoupper( $p['paymentStatus'] ?? '' );
+                $due_ts      = strtotime( $p['dueDate'] ?? '' );
+                $mapPaid     = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
+
+                $isPaid    = in_array( $p_stat, $mapPaid, true );
+                $isOverdue = ( in_array( $p_stat, ['OVERDUE','INACTIVE'], true ) || ( $due_ts && $due_ts < time() && ! $isPaid ) );
+
+                if ( $isPaid )      { $pag = date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? '')); $cls = 'paid'; }
+                elseif ( $isOverdue ){ $pag = 'ATRASADA'; $cls = 'overdue'; }
+                else                 { $pag = '—'; $cls = 'future'; }
+
+                $tooltip = "Valor: R$ {$val}\nCriação: {$created}\nPagamento: {$pag}";
+            } else {
+                $tooltip = 'Parcela não criada';
+                $cls     = 'future';
+            }
+            $r .= '<span class="status-box '. esc_attr($cls) .'" data-tooltip="'. esc_attr($tooltip) .'"></span>';
+        }
+        $r .= '</td>';
+
+        // status geral
+        $r .= '<td>';
+        $stat = strtoupper( trim( $sub['status'] ?? '' ) );
+        $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
+        if ( in_array( $stat, $expiredStatuses, true ) ) {
+            $date = $sub['cancelled_at'] ?? ($sub['cancelledAt'] ?? ($sub['canceledAt'] ?? ($sub['expiredAt'] ?? ($sub['updated'] ?? ''))));
+            $r .= $date ? 'Cancelado em ' . date_i18n('d/m/Y', strtotime($date)) : 'Cancelado';
         } else {
-            $tooltip = 'Parcela não criada';
-            $cls     = 'future';
-            $countFuture++;
+            $r .= $stat === 'ACTIVE' ? 'Ativo' : ( $stat === 'INACTIVE' ? 'Inativo' : ucfirst(strtolower($sub['status'] ?? '—')) );
         }
+        $r .= '</td></tr>';
 
-        $r .= '<span class="status-box '. esc_attr( $cls ) .'" data-tooltip="'. esc_attr( $tooltip ) .'"></span>';
-    }
+        return $r;
+    };
 
-    $r .= "<div class='debug-info'>{$countPaid} pagas<br>{$countOverdue} atrasadas<br>{$countFuture} futuras</div>";
-    $r .= '</td>';
-
-    // Coluna Status assinatura
-    $stat = strtoupper( trim( $sub['status'] ?? '' ) );
-    $r .= '<td>';
-    if ( in_array( $stat, $expiredStatuses, true ) ) {
-        $date_raw = $sub['cancelled_at'] ?? $sub['cancelledAt'] ?? $sub['canceledAt'] ?? $sub['expiredAt'] ?? $sub['updated'] ?? '';
-        $date_ts  = $date_raw ? strtotime( $date_raw ) : false;
-        $r .= $date_ts ? 'Cancelado em ' . esc_html( date_i18n( 'd/m/Y', $date_ts ) ) : 'Cancelado';
-    } else {
-        switch ( $stat ) {
-            case 'ACTIVE':   $label = 'Ativo';   break;
-            case 'INACTIVE': $label = 'Inativo'; break;
-            default:         $label = ucfirst( strtolower( $sub['status'] ?? '—' ) );
-        }
-        $r .= esc_html( $label );
-    }
-    $r .= '</td></tr>';
-
-    return $r;
-};
-
-
-    // Monta tabelas por categoria
     foreach ( [ 'em_atraso' => 'Em Atraso', 'em_dia' => 'Em Dia', 'canceladas' => 'Canceladas' ] as $key => $titulo ) {
         $html .= "<h3>Assinaturas — {$titulo}</h3>";
         $html .= "<table class='dash-table'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
-        if ( empty( $grupos[ $key ] ) ) {
+        if ( empty( $grupos[$key] ) ) {
             $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
         } else {
-            foreach ( $grupos[ $key ] as $entry ) {
+            foreach ( $grupos[$key] as $entry ) {
                 $html .= $render_row( $entry['sub'], $entry['payments'] );
             }
         }
