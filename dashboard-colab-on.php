@@ -9,8 +9,29 @@ Author: Luis Furtado
 defined('ABSPATH') || exit;
 
 /**
+ * Aceita [dashboard_assinantes_e_pedidos_3815] e converte para
+ * [dashboard_assinantes_e_pedidos id="3815"] antes do do_shortcode rodar.
+ */
+function dash_dynamic_shortcode_alias($content) {
+    // fecha auto-fechado [...] e também com [/shortcode]
+    $pattern = '/\[dashboard_assinantes_e_pedidos_(\d+)(\s*\/)?\]/i';
+    $content = preg_replace($pattern, '[dashboard_assinantes_e_pedidos id="$1"]', $content);
+
+    // Versão com fechamento explícito (caso alguém use)
+    $pattern2 = '/\[dashboard_assinantes_e_pedidos_(\d+)\](.*?)\[\/dashboard_assinantes_e_pedidos_\1\]/is';
+    $content  = preg_replace($pattern2, '[dashboard_assinantes_e_pedidos id="$1"]$2[/dashboard_assinantes_e_pedidos]', $content);
+
+    return $content;
+}
+// Rodar antes do do_shortcode (que costuma estar em prioridade 11)
+add_filter('the_content', 'dash_dynamic_shortcode_alias', 9);
+add_filter('widget_text', 'dash_dynamic_shortcode_alias', 9);
+add_filter('widget_block_content', 'dash_dynamic_shortcode_alias', 9);
+
+
+/**
  * -----------------------------------------------------------------------------
- * 1) Assinaturas + dados básicos do usuário
+ *  Assinaturas + dados básicos do usuário
  * -----------------------------------------------------------------------------
  */
 function fetch_all_asaas_subscriptions() {
@@ -38,7 +59,7 @@ function fetch_all_asaas_subscriptions() {
 
 /**
  * -----------------------------------------------------------------------------
- * 2) Parcelas/pagamentos da assinatura (ordenadas antigas → novas)
+ * Parcelas/pagamentos da assinatura (ordenadas antigas → novas)
  * -----------------------------------------------------------------------------
  */
 function fetch_asaas_subscription_payments($subscriptionID) {
@@ -217,11 +238,15 @@ function get_cycles_from_wc_subscription_order($order_id) {
  * 3) Render do Dashboard
  * -----------------------------------------------------------------------------
  */
-function mostrar_dashboard_assinantes() {
+function mostrar_dashboard_assinantes($atts = []) {
+    // aceita [dashboard_assinantes_e_pedidos id="3815"]
+    $atts = shortcode_atts(['id' => 0], $atts, 'dashboard_assinantes_e_pedidos');
+    $filter_id       = absint($atts['id']);
+    $filter_base_id  = $filter_id ? maybe_get_parent_product_id_local($filter_id) : 0;
+
     $subs  = fetch_all_asaas_subscriptions();
     $agora = time();
 
-    // Conjuntos padronizados de status
     $expiredStatuses = ['CANCELLED', 'CANCELED', 'EXPIRED'];
     $overdueStatuses = ['OVERDUE', 'INACTIVE'];
     $mapPaid         = ['PAYED', 'PAID', 'RECEIVED', 'RECEIVED_IN_CASH', 'CONFIRMED'];
@@ -232,25 +257,39 @@ function mostrar_dashboard_assinantes() {
         'canceladas' => [],
     ];
 
-    // Agrupamento por status
+    $product_ids_set = [];
+
     foreach ($subs as $sub) {
+        // ID da assinatura (pk da sua tabela)
+        $subscription_pk_id = (int) ($sub['id'] ?? 0);
+
+        // product_id realmente vinculado a esta assinatura
+        $pid_for_select = get_product_id_for_subscription_local($subscription_pk_id);
+        if (!empty($pid_for_select)) {
+            $product_ids_set[$pid_for_select] = true;
+        }
+
+        // === FILTRO PELO ID DO CURSO (via shortcode) ===
+        if ($filter_id) {
+            $pid_base = maybe_get_parent_product_id_local($pid_for_select);
+            // mantém se bater com o id exato OU com o produto-base
+            if ( (int)$pid_for_select !== (int)$filter_id && (int)$pid_base !== (int)$filter_base_id ) {
+                continue; // não é deste curso → pula
+            }
+        }
+
         $stat_raw = strtoupper(trim($sub['status'] ?? ''));
 
-            $payments_all = fetch_asaas_subscription_payments($sub['subscriptionID'] ?? '');
+        // Pega parcelas e remove reembolsadas
+        $payments_all = fetch_asaas_subscription_payments($sub['subscriptionID'] ?? '');
+        $payments = array_values(array_filter($payments_all, static function ($p) {
+            return strtolower(trim($p['status'] ?? '')) !== 'refunded';
+        }));
 
-            // Filtra não-refundadas
-            $payments_non_refunded = array_values(array_filter($payments_all, static function ($p) {
-                return strtolower(trim($p['status'] ?? '')) !== 'refunded';
-            }));
-
-            // Se há parcelas, porém TODAS são refunded, não exibir este cliente no dashboard
-            if (!empty($payments_all) && empty($payments_non_refunded)) {
-                continue; // pula para a próxima assinatura
-            }
-
-            // A partir daqui, trabalhe só com as não-refundadas
-            $payments = $payments_non_refunded;
-
+        // se só tinha refund, não mostra
+        if (!empty($payments_all) && empty($payments)) {
+            continue;
+        }
 
         if (in_array($stat_raw, $expiredStatuses, true)) {
             $grupos['canceladas'][] = compact('sub', 'payments');
@@ -262,7 +301,7 @@ function mostrar_dashboard_assinantes() {
             foreach ($payments as $p) {
                 $p_stat = strtoupper($p['paymentStatus'] ?? '');
                 $due    = strtotime($p['dueDate'] ?? '');
-                if (!in_array($p_stat, $mapPaid, true) && (in_array($p_stat, ['OVERDUE', 'INACTIVE'], true) || ($due && $due < $agora))) {
+                if (!in_array($p_stat, $mapPaid, true) && (in_array($p_stat, ['OVERDUE','INACTIVE'], true) || ($due && $due < $agora))) {
                     $hasOverdue = true;
                     break;
                 }
@@ -272,6 +311,7 @@ function mostrar_dashboard_assinantes() {
         $key = $hasOverdue ? 'em_atraso' : 'em_dia';
         $grupos[$key][] = compact('sub', 'payments');
     }
+
 
     // CSS
     $html = '<style>
@@ -293,7 +333,6 @@ function mostrar_dashboard_assinantes() {
 </style>';
 
     // Campo de busca
-       // Busca
     $html .= '<div style="width:100%;">
     <input type="text" id="search-assinantes"
   placeholder="Buscar por nome, e-mail, CPF"
@@ -326,8 +365,6 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 ";
-
-
     // Closure para render de cada linha
     $render_row = function ($sub, $payments) use ($agora, $mapPaid, $expiredStatuses) {
         $payments = is_array($payments) ? $payments : [];
@@ -461,6 +498,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         return $r;
     };
+
 
     // Tabelas por grupo
     foreach (['em_atraso' => 'Em Atraso', 'em_dia' => 'Em Dia', 'canceladas' => 'Canceladas'] as $key => $titulo) {
