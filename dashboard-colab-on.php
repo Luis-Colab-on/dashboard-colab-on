@@ -3,7 +3,7 @@
 Plugin Name: Meu Plugin Dashboard Assinantes
 Description: Exibe assinaturas Asaas agrupadas por status (Em Dia, Em Atraso e Canceladas) via shortcode [dashboard_assinantes_e_pedidos]
 Version: 1.18
-Author: Luis Furtado (otimizado)
+Author: Luis Furtado
 */
 
 // Segurança básica
@@ -23,14 +23,24 @@ function dash_dynamic_shortcode_alias($content) {
         '[dashboard_assinantes_e_pedidos id="$1"]',
         $content
     );
+
     // Forma com fechamento [shortcode_123]...[/shortcode_123]
     $content = preg_replace(
         '/\\[dashboard_assinantes_e_pedidos_(\\d+)\\](.*?)\\[\\/dashboard_assinantes_e_pedidos_\\1\\]/is',
         '[dashboard_assinantes_e_pedidos id="$1"]$2[/dashboard_assinantes_e_pedidos]',
         $content
     );
+
+    // Normaliza atributos SEM "=" para a forma com "="
+    $content = preg_replace(
+        '/\\[dashboard_assinantes_e_pedidos\\s+(id|corseid)\\s+[\'"]?(\\d+)[\'"]?\\s*\\]/i',
+        '[dashboard_assinantes_e_pedidos $1="$2"]',
+        $content
+    );
+
     return $content;
 }
+
 add_filter('the_content', 'dash_dynamic_shortcode_alias', 9);
 add_filter('widget_text', 'dash_dynamic_shortcode_alias', 9);
 add_filter('widget_block_content', 'dash_dynamic_shortcode_alias', 9);
@@ -89,7 +99,7 @@ function dash_fetch_all_asaas_subscriptions() {
 function dash_get_product_map_for_subscriptions(array $subscription_ids) {
     global $wpdb;
     $map = [];
-    $subscription_ids = array_values(array_filter(array_map('absint', $subscription_ids))); // sanitize
+    $subscription_ids = array_values(array_filter(array_map('absint', $subscription_ids)));
     if (empty($subscription_ids)) return $map;
 
     $items_table = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions_items';
@@ -109,7 +119,8 @@ function dash_get_product_map_for_subscriptions(array $subscription_ids) {
 
 /**
  * Busca pagamentos para várias assinaturas de uma vez.
- * Retorna [ subscriptionID(string) => [ rows... ] ], filtrando REFUNDED.
+ * Retorna [ subscriptionID(string) => [ rows... ] ],
+ * ignorando itens neutros (REFUNDED/CANCELLED/DELETED/CHARGEBACK).
  */
 function dash_fetch_payments_map(array $subscriptionIDs) {
     global $wpdb;
@@ -136,9 +147,14 @@ function dash_fetch_payments_map(array $subscriptionIDs) {
         foreach ($rows as $r) {
             $sid = (string)($r['orderID'] ?? '');
             if ($sid === '') continue;
-            // pula reembolsados
-            $st = strtolower(trim($r['status'] ?? ''));
-            if ($st === 'refunded') continue;
+
+            $st = strtoupper(trim($r['paymentStatus'] ?? ''));
+
+            // Ignora itens neutros que não devem pesar no cálculo de atraso
+            if (in_array($st, ['REFUNDED','CANCELLED','DELETED','CHARGEBACK'], true)) {
+                continue;
+            }
+
             if (!isset($out[$sid])) $out[$sid] = [];
             $out[$sid][] = $r;
         }
@@ -254,19 +270,31 @@ function dash_get_cycles_from_wc_subscription_order($order_id) {
  * =============================================================
  */
 function mostrar_dashboard_assinantes($atts = []) {
-    // [dashboard_assinantes_e_pedidos id="3815"] (filtra por produto ou seu pai)
-    $atts = shortcode_atts(['id' => 0], $atts, 'dashboard_assinantes_e_pedidos');
-    $filter_id      = absint($atts['id']);
+    // Agora aceitamos id e corseid
+    $atts = shortcode_atts(['id' => 0, 'corseid' => 0], $atts, 'dashboard_assinantes_e_pedidos');
+
+    // prioriza corseid; se não vier, usa id
+    $raw = $atts['corseid'] ?: $atts['id'];
+
+    // extrai dígitos se vier em formato estranho (ex.: id "1234")
+    if (is_string($raw) && preg_match('/^\\s*(\\d+)/', $raw, $m)) {
+        $raw = $m[1];
+    }
+
+    $filter_id      = absint($raw);
     $filter_base_id = $filter_id ? dash_maybe_get_parent_product_id($filter_id) : 0;
 
     $subs  = dash_fetch_all_asaas_subscriptions();
-    $agora = time();
+
+    // >>> Usa timezone do WordPress e compara por data (Y-m-d)
+    $agora    = current_time('timestamp');
+    $hojeYmd  = date_i18n('Y-m-d', $agora);
 
     // Coleta IDs para prefetch
     $subscription_table_ids = [];
     $subscriptionIDs        = [];
     foreach ($subs as $s) {
-        $subscription_table_ids[] = (int) ($s['id'] ?? 0);               // pk da sua tabela
+        $subscription_table_ids[] = (int) ($s['id'] ?? 0);                 // pk da sua tabela
         $subscriptionIDs[]        = (string) ($s['subscriptionID'] ?? ''); // ID textual usado em pagamentos
     }
 
@@ -275,7 +303,7 @@ function mostrar_dashboard_assinantes($atts = []) {
     $pay_map = dash_fetch_payments_map(array_filter($subscriptionIDs));
 
     $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
-    $overdueStatuses = ['OVERDUE','INACTIVE'];
+    $overdueStatuses = ['OVERDUE']; // 'INACTIVE' não implica atraso
     $mapPaid         = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
 
     $grupos = [ 'em_dia' => [], 'em_atraso' => [], 'canceladas' => [] ];
@@ -297,10 +325,10 @@ function mostrar_dashboard_assinantes($atts = []) {
 
         $stat_raw = strtoupper(trim($sub['status'] ?? ''));
 
-        // Pagamentos (já filtrados sem REFUNDED)
+        // Pagamentos (já filtrados sem itens neutros)
         $payments = array_values($pay_map[$subscriptionID] ?? []);
 
-        // se só tinha refund (ou nenhum válido), e havia registros brutos, some
+        // se só tinha itens neutros (ou nenhum válido), e havia registros brutos, some
         if ((isset($pay_map[$subscriptionID]) && empty($payments))) {
             continue;
         }
@@ -310,14 +338,22 @@ function mostrar_dashboard_assinantes($atts = []) {
             continue;
         }
 
-        // Detecta atraso por status geral ou por parcelas vencidas
-        $hasOverdue = in_array($stat_raw, $overdueStatuses, true);
+        // --- Regra "Em dia na hora" + evitar atraso no dia do vencimento ---
+        $hasOverdue = in_array($stat_raw, $overdueStatuses, true); // exemplo: status geral OVERDUE
         if (!$hasOverdue && $payments) {
             foreach ($payments as $p) {
-                $p_stat = strtoupper($p['paymentStatus'] ?? '');
-                $due    = strtotime($p['dueDate'] ?? '');
-                if (!in_array($p_stat, $mapPaid, true) && (in_array($p_stat, ['OVERDUE','INACTIVE'], true) || ($due && $due < $agora))) {
-                    $hasOverdue = true; break;
+                $p_stat  = strtoupper($p['paymentStatus'] ?? '');
+                $due_ts  = strtotime($p['dueDate'] ?? '');
+                $orig_ts = strtotime($p['originalDueDate'] ?? '');
+                $venc_ts = $due_ts ?: $orig_ts;
+
+                $dueYmd  = $venc_ts ? date_i18n('Y-m-d', $venc_ts) : null;
+                $isPaid  = in_array($p_stat, $mapPaid, true);
+
+                // Atraso real: status OVERDUE OU (não pago E dueDate < hoje)
+                if (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd))) {
+                    $hasOverdue = true;
+                    break;
                 }
             }
         }
@@ -326,9 +362,19 @@ function mostrar_dashboard_assinantes($atts = []) {
         $grupos[$key][] = ['sub' => $sub, 'payments' => $payments, 'product_id' => $pid_for_select];
     }
 
-    // ===== CSS (mais leve) =====
-$css .= '<style>
-:root{ --dash-primary:#0a66c2; --dash-primary-dark:#084a8f; --dash-text:#1f2937; --dash-muted:#6b7280; --dash-border:#e5e7eb; }
+    // ===== CSS (mais leve) + paleta agradável =====
+    $css = '<style>
+:root{
+  --dash-primary:#0a66c2; --dash-primary-dark:#084a8f;
+  --dash-text:#1f2937; --dash-muted:#6b7280; --dash-border:#e5e7eb;
+
+  /* Paleta de status */
+  --paid:#16a34a;        /* verde 600 */
+  --overdue:#e11d48;     /* rose 600 */
+  --pending:#f59e0b;     /* amber 500 */
+  --future:#e5e7eb;      /* cinza claro */
+  --box-border:rgba(0,0,0,.35);
+}
 .dash-wrap{font-family:Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; color:var(--dash-text)}
 .dash-h3{margin:24px 0 8px; font-size:1.125rem; font-weight:700}
 /* bordas mais grossas e sem cortar tooltip */
@@ -344,18 +390,24 @@ $css .= '<style>
 .dash-input{flex:1 1 260px; max-width:420px; padding:8px 10px; border:1px solid rgba(0,0,0,0.8); border-radius:8px}
 .dash-btn{padding:8px 14px; border-radius:8px; background:var(--dash-primary); color:#fff; border:0; cursor:pointer; transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease, filter .14s ease; border:1px solid var(--dash-primary);}
 .dash-btn:hover{background:var(--dash-primary-dark); border:1px solid var(--dash-primary-dark); transform: translateY(-1px) scale(1.1);}
-.status-box{position:relative; display:inline-block; width:14px; height:14px; margin:0 2px; border-radius:3px; border:1px solid rgba(0, 0, 0, 0.35); transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease, filter .14s ease; cursor: default; z-index:1;}
+.status-box{position:relative; display:inline-block; width:14px; height:14px; margin:0 2px; border-radius:3px; border:1px solid var(--box-border); transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease, filter .14s ease; cursor: default; z-index:1;}
 .status-box:hover{transform: translateY(-1px) scale(1.18); box-shadow: 0 6px 16px rgba(0,0,0,.18); border-color: rgba(0, 0, 0, 0.5);}
-.status-box.paid{ background:#22c55e; box-shadow: inset 0 0 0 1px rgba(0,0,0,.06); }
-.status-box.paid:hover{ filter: saturate(1.15) brightness(1.05); }
-.status-box.overdue{ background:#ef4444; }
-.status-box.future{ background:transparent; }
+.status-box.paid{ background: #16a34a; box-shadow: inset 0 0 0 1px rgba(0,0,0,.06); }
+.status-box.paid:hover{ filter: saturate(1.1) brightness(1.03); }
+.status-box.overdue{ background:var(--overdue); }
+.status-box.pending{
+  background:#ff8c00;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255,255,255,.34) 0 2px,rgba(255,255,255,0) 2px 6px
+  );
+  background-clip: padding-box;
+}
+.status-box.future{ background:var(--future); border-style:dashed; }
 .status-box[data-tooltip]:hover::after{content:attr(data-tooltip); position:absolute; bottom: calc(100% + 8px); left:50%; transform:translateX(-50%); background:rgba(17,24,39,.96); color:#fff; padding:8px 10px; border-radius:6px; white-space:pre; font-size:.8em; line-height:1.3; max-width:20rem; text-align:left; z-index:9999; pointer-events:none;}
 .status-box[data-tooltip]:hover::before{content:""; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:6px solid transparent; border-top-color:rgba(17,24,39,.96);}
 .debug-info{display:none !important;}
 </style>';
-
-
 
     // ===== Busca (nome/email/CPF) =====
     $search = '<div class="dash-wrap"><div class="dash-search" role="search" aria-label="Filtrar assinantes">
@@ -363,8 +415,17 @@ $css .= '<style>
         <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
     </div>';
 
+    // ===== Legenda visual =====
+    $legend = '
+      <div style="display:flex;gap:14px;align-items:center;margin:4px 0 10px;flex-wrap:wrap;font-size:.9rem;color:#374151">
+        <span><span class="status-box paid"></span> Pago</span>
+        <span><span class="status-box overdue"></span> Em atraso</span>
+        <span><span class="status-box pending"></span> Pendente</span>
+        <span><span class="status-box future"></span> Não criada</span>
+      </div>';
+
     // ===== Tabela builder =====
-    $build_row = function(array $sub, array $payments, int $product_id) use ($agora) {
+    $build_row = function(array $sub, array $payments, int $product_id) use ($agora, $hojeYmd) {
         $subscription_pk_id = (int) ($sub['id'] ?? 0);
         $base_id            = dash_maybe_get_parent_product_id($product_id);
 
@@ -398,8 +459,8 @@ $css .= '<style>
         // Render row
         $cpf_display = $sub['cpf'] ?? ($sub['customer_cpf'] ?? '—');
         $r  = '<tr id="sub-' . (int) $subscription_pk_id . '" ' .
-      'data-course-id="' . esc_attr($product_id ?: 0) . '" ' .
-      'data-course-base-id="' . esc_attr($base_id ?: 0) . '">';
+              'data-course-id="' . esc_attr($product_id ?: 0) . '" ' .
+              'data-course-base-id="' . esc_attr($base_id ?: 0) . '">';
 
         $r .= '<td>' . esc_html($sub['customer_name'] ?? '—') . '</td>';
         $r .= '<td>' . esc_html($sub['customer_email'] ?? '—') . '</td>';
@@ -407,23 +468,46 @@ $css .= '<style>
 
         $r .= '<td>';
         foreach ($installments as $p) {
-            $cls = 'future'; $tooltip = 'Parcela não criada';
+            // defaults: slot ainda não criado
+            $cls = 'future';
+            $pag = '—';
+            $status_tip = 'Não criada';
+            $tooltip = 'Parcela não criada';
+
             if ($p) {
-                $val   = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : '0,00';
-                $creAt = $p['created'] ?? ($p['createdAt'] ?? '');
+                $val     = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : '0,00';
+                $creAt   = $p['created'] ?? ($p['createdAt'] ?? '');
                 $created = $creAt ? date_i18n('d/m/Y - H:i', strtotime($creAt)) : '—';
+
                 $p_stat  = strtoupper($p['paymentStatus'] ?? '');
                 $due_ts  = strtotime($p['dueDate'] ?? '');
+                $orig_ts = strtotime($p['originalDueDate'] ?? '');
+                $venc_ts = $due_ts ?: $orig_ts;
+                $venc    = $venc_ts ? date_i18n('d/m/Y', $venc_ts) : '—';
 
-                $isPaid    = in_array($p_stat, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
-                $isOverdue = (!$isPaid && ($due_ts && $due_ts < $agora || in_array($p_stat, ['OVERDUE','INACTIVE'], true)));
+                $dueYmd  = $venc_ts ? date_i18n('Y-m-d', $venc_ts) : null;
+                $isPaid  = in_array($p_stat, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
+                $isOverdue = (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd)));
 
-                if ($isPaid) { $cls='paid'; $pag=date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? '')); }
-                elseif ($isOverdue) { $cls='overdue'; $pag='ATRASADA'; }
-                else { $cls='future'; $pag='—'; }
+                if ($isPaid) {
+                    $cls = 'paid';
+                    $pag = date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? ''));
+                    $status_tip = 'Pago';
+                } elseif ($isOverdue) {
+                    $cls = 'overdue';
+                    $pag = 'ATRASADA';
+                    $status_tip = 'Em atraso';
+                } else {
+                    // existe parcela, não paga e ainda não venceu => laranja
+                    $cls = 'pending';
+                    $status_tip = 'Pendente';
+                }
 
-                $tooltip = "Valor: R$ {$val}\nCriação: {$created}\nPagamento: {$pag}";
+                // tooltip completo quando existe parcela
+                $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created}\nVencimento: {$venc}\nPagamento: {$pag}";
             }
+
+            // imprime uma única box por parcela
             $r .= '<span class="status-box ' . esc_attr($cls) . '" data-tooltip="' . esc_attr($tooltip) . '"></span>';
         }
         $r .= '</td>';
@@ -442,7 +526,7 @@ $css .= '<style>
         return $r;
     };
 
-    $html = $css . $search;
+    $html = $css . $search . $legend;
 
     foreach (['em_atraso' => 'Em Atraso', 'em_dia' => 'Em Dia', 'canceladas' => 'Canceladas'] as $key => $titulo) {
         $html .= '<h3 class="dash-h3">Assinaturas — ' . esc_html($titulo) . '</h3>';
@@ -461,7 +545,7 @@ $css .= '<style>
     $html .= "<script>
 (function(){
   function normalize(s){
-    return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    return (s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase();
   }
   function doFilter(){
     var q = normalize(document.getElementById('dash-search-input').value.trim());
@@ -486,7 +570,7 @@ $css .= '<style>
 
   /* >>> SOMENTE pelo botão (sem filtrar ao digitar/Enter) */
   var btn = document.getElementById('dash-search-btn');
-  btn.addEventListener('click', doFilter);
+  if(btn){ btn.addEventListener('click', doFilter); }
 })();
 </script>
 </div>";
