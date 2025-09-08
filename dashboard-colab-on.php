@@ -362,7 +362,13 @@ function mostrar_dashboard_assinantes($atts = []) {
         $grupos[$key][] = ['sub' => $sub, 'payments' => $payments, 'product_id' => $pid_for_select];
     }
 
-    // ===== CSS (mais leve) + paleta agradável =====
+    // Contagens para o resumo
+    $cnt_dia        = count($grupos['em_dia']);
+    $cnt_atraso     = count($grupos['em_atraso']);
+    $cnt_canceladas = count($grupos['canceladas']);
+    $cnt_total      = $cnt_dia + $cnt_atraso + $cnt_canceladas;
+
+    // ===== CSS (mantendo paleta/estética atual) =====
     $css = '<style>
 :root{
   --dash-primary:#0a66c2; --dash-primary-dark:#084a8f;
@@ -407,10 +413,55 @@ function mostrar_dashboard_assinantes($atts = []) {
 .status-box[data-tooltip]:hover::after{content:attr(data-tooltip); position:absolute; bottom: calc(100% + 8px); left:50%; transform:translateX(-50%); background:rgba(17,24,39,.96); color:#fff; padding:8px 10px; border-radius:6px; white-space:pre; font-size:.8em; line-height:1.3; max-width:20rem; text-align:left; z-index:9999; pointer-events:none;}
 .status-box[data-tooltip]:hover::before{content:""; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:6px solid transparent; border-top-color:rgba(17,24,39,.96);}
 .debug-info{display:none !important;}
+
+/* === RESUMO (novo), baseado na estética atual === */
+.dash-summary{display:grid; grid-template-columns: repeat(4,minmax(140px,1fr)); gap:10px; margin:12px 0 8px;}
+.dash-kpi{border:2px solid #000; border-radius:10px; padding:10px 12px; background:#fafafa; box-shadow:0 1px 2px rgba(0,0,0,.04);}
+.dash-kpi .dash-kpi-label{font-size:.82rem; color:#374151; text-transform:uppercase; letter-spacing:.03em}
+.dash-kpi .dash-kpi-value{font-weight:800; font-size:1.35rem; display:flex; align-items:baseline; gap:6px;}
+.dash-kpi .dash-kpi-value small{font-size:.9rem; color:var(--dash-muted);}
+.dash-kpi.emdia   .dash-kpi-value{color:var(--paid);}
+.dash-kpi.atraso  .dash-kpi-value{color:var(--overdue);}
+.dash-kpi.cancel  .dash-kpi-value{color:#111827;}
+.dash-summary-note{margin:6px 0 0; font-size:.9rem; color:#374151;}
 </style>';
 
-    // ===== Busca (nome/email/CPF) =====
-    $search = '<div class="dash-wrap"><div class="dash-search" role="search" aria-label="Filtrar assinantes">
+    // ===== RESUMO (antes da busca e do dashboard) =====
+    $summary = '
+<div class="dash-summary" role="region" aria-label="Resumo das assinaturas">
+  <div class="dash-kpi total">
+    <div class="dash-kpi-label">Assinaturas</div>
+    <div class="dash-kpi-value">
+      <span id="kpi-total-now">'.(int)$cnt_total.'</span>
+      <small>/ '.(int)$cnt_total.'</small>
+    </div>
+  </div>
+  <div class="dash-kpi emdia">
+    <div class="dash-kpi-label">Em Dia</div>
+    <div class="dash-kpi-value">
+      <span id="kpi-dia-now">'.(int)$cnt_dia.'</span>
+      <small>/ '.(int)$cnt_dia.'</small>
+    </div>
+  </div>
+  <div class="dash-kpi atraso">
+    <div class="dash-kpi-label">Em Atraso</div>
+    <div class="dash-kpi-value">
+      <span id="kpi-atraso-now">'.(int)$cnt_atraso.'</span>
+      <small>/ '.(int)$cnt_atraso.'</small>
+    </div>
+  </div>
+  <div class="dash-kpi cancel">
+    <div class="dash-kpi-label">Canceladas</div>
+    <div class="dash-kpi-value">
+      <span id="kpi-cancel-now">'.(int)$cnt_canceladas.'</span>
+      <small>/ '.(int)$cnt_canceladas.'</small>
+    </div>
+  </div>
+</div>
+<div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
+
+    // ===== Busca (nome/email/CPF) — agora vem após o resumo =====
+    $search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes">
         <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
         <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
     </div>';
@@ -530,7 +581,8 @@ function mostrar_dashboard_assinantes($atts = []) {
 
     foreach (['em_atraso' => 'Em Atraso', 'em_dia' => 'Em Dia', 'canceladas' => 'Canceladas'] as $key => $titulo) {
         $html .= '<h3 class="dash-h3">Assinaturas — ' . esc_html($titulo) . '</h3>';
-        $html .= "<table class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
+        // >>> adiciona id para contagem por grupo no resumo
+        $html .= "<table id='dash-table-{$key}' class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
         if (empty($grupos[$key])) {
             $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
         } else {
@@ -541,12 +593,42 @@ function mostrar_dashboard_assinantes($atts = []) {
         $html .= '</tbody></table>';
     }
 
-    // ===== JS: filtro em tempo real + botão =====
+    // ===== JS: filtro em tempo real + atualização do resumo =====
     $html .= "<script>
 (function(){
   function normalize(s){
     return (s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase();
   }
+
+  function countVisibleRows(tableId){
+    var t = document.getElementById(tableId);
+    if(!t) return 0;
+    var rows = t.querySelectorAll('tbody tr[id^=\"sub-\"]');
+    var n = 0;
+    rows.forEach(function(r){
+      if(r.style.display !== 'none'){ n++; }
+    });
+    return n;
+  }
+
+  function updateSummary(){
+    var visDia   = countVisibleRows('dash-table-em_dia');
+    var visAtr   = countVisibleRows('dash-table-em_atraso');
+    var visCanc  = countVisibleRows('dash-table-canceladas');
+    var visTotal = visDia + visAtr + visCanc;
+
+    var el;
+    if((el = document.getElementById('kpi-dia-now')))      el.textContent = visDia;
+    if((el = document.getElementById('kpi-atraso-now')))   el.textContent = visAtr;
+    if((el = document.getElementById('kpi-cancel-now')))   el.textContent = visCanc;
+    if((el = document.getElementById('kpi-total-now')))    el.textContent = visTotal;
+
+    if((el = document.getElementById('dash-summary-note'))) {
+      var totalStatic = ".(int)$cnt_total.";
+      el.textContent = 'Mostrando ' + visTotal + ' de ' + totalStatic + ' assinaturas';
+    }
+  }
+
   function doFilter(){
     var q = normalize(document.getElementById('dash-search-input').value.trim());
     document.querySelectorAll('.dash-table tbody tr').forEach(function(tr){
@@ -566,11 +648,16 @@ function mostrar_dashboard_assinantes($atts = []) {
         rid.includes(q) || cid.includes(q) || cbase.includes(q)
       ) ? '' : 'none';
     });
+
+    updateSummary(); // >>> atualiza o resumo na hora da filtragem
   }
 
   /* >>> SOMENTE pelo botão (sem filtrar ao digitar/Enter) */
   var btn = document.getElementById('dash-search-btn');
   if(btn){ btn.addEventListener('click', doFilter); }
+
+  // Ajusta o resumo no carregamento inicial (sem filtro)
+  updateSummary();
 })();
 </script>
 </div>";
