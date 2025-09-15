@@ -40,11 +40,9 @@ function dash_dynamic_shortcode_alias($content) {
 
     return $content;
 }
-
 add_filter('the_content', 'dash_dynamic_shortcode_alias', 9);
 add_filter('widget_text', 'dash_dynamic_shortcode_alias', 9);
 add_filter('widget_block_content', 'dash_dynamic_shortcode_alias', 9);
-
 
 /**
  * =============================================================
@@ -90,7 +88,6 @@ function dash_fetch_all_asaas_subscriptions() {
     $rows = $wpdb->get_results($sql, ARRAY_A);
     return is_array($rows) ? $rows : [];
 }
-
 
 /**
  * Mapeia product_id para várias assinaturas de uma só vez para reduzir roundtrips.
@@ -151,9 +148,7 @@ function dash_fetch_payments_map(array $subscriptionIDs) {
             $st = strtoupper(trim($r['paymentStatus'] ?? ''));
 
             // Ignora itens neutros que não devem pesar no cálculo de atraso
-            if (in_array($st, ['REFUNDED','CANCELLED','DELETED','CHARGEBACK'], true)) {
-                continue;
-            }
+            if (in_array($st, ['REFUNDED','CANCELLED','DELETED','CHARGEBACK'], true)) continue;
 
             if (!isset($out[$sid])) $out[$sid] = [];
             $out[$sid][] = $r;
@@ -161,7 +156,6 @@ function dash_fetch_payments_map(array $subscriptionIDs) {
     }
     return $out;
 }
-
 
 /**
  * =============================================================
@@ -198,9 +192,7 @@ function dash_get_subscription_cycles_from_product($product_id) {
             $product_obj = wc_get_product($base_id);
             if ($product_obj) {
                 $len = \WC_Subscriptions_Product::get_length($product_obj);
-                if ($len !== null && $len !== '') {
-                    $length = (int) $len;
-                }
+                if ($len !== null && $len !== '') $length = (int) $len;
             }
         } catch (\Throwable $e) {}
     }
@@ -221,12 +213,8 @@ function dash_get_subscription_cycles_from_product($product_id) {
             $blob = ' ' . $p->get_name() . ' ';
             if (method_exists($p, 'get_short_description')) $blob .= ' ' . $p->get_short_description();
             if (method_exists($p, 'get_description'))       $blob .= ' ' . $p->get_description();
-            if (preg_match('/\\b(\\d{1,2})\\s*mes(?:es)?\\b/i', $blob, $m)) {
-                $length = (int) $m[1];
-            }
-            if ($length === null && preg_match('/\\b(\\d{1,2})\\s*x\\b/i', $blob, $m2)) {
-                $length = (int) $m2[1];
-            }
+            if (preg_match('/\\b(\\d{1,2})\\s*mes(?:es)?\\b/i', $blob, $m)) $length = (int) $m[1];
+            if ($length === null && preg_match('/\\b(\\d{1,2})\\s*x\\b/i', $blob, $m2)) $length = (int) $m2[1];
         }
     }
 
@@ -263,7 +251,6 @@ function dash_get_cycles_from_wc_subscription_order($order_id) {
     return ($cycles >= 0) ? $cycles : null;
 }
 
-
 /**
  * =============================================================
  * 3) Renderização do Dashboard
@@ -277,18 +264,16 @@ function mostrar_dashboard_assinantes($atts = []) {
     $raw = $atts['corseid'] ?: $atts['id'];
 
     // extrai dígitos se vier em formato estranho (ex.: id "1234")
-    if (is_string($raw) && preg_match('/^\\s*(\\d+)/', $raw, $m)) {
-        $raw = $m[1];
-    }
+    if (is_string($raw) && preg_match('/^\\s*(\\d+)/', $raw, $m)) $raw = $m[1];
 
     $filter_id      = absint($raw);
     $filter_base_id = $filter_id ? dash_maybe_get_parent_product_id($filter_id) : 0;
 
-    $subs  = dash_fetch_all_asaas_subscriptions();
+    $subs = dash_fetch_all_asaas_subscriptions();
 
     // >>> Usa timezone do WordPress e compara por data (Y-m-d)
-    $agora    = current_time('timestamp');
-    $hojeYmd  = date_i18n('Y-m-d', $agora);
+    $agora   = current_time('timestamp');
+    $hojeYmd = date_i18n('Y-m-d', $agora);
 
     // Coleta IDs para prefetch
     $subscription_table_ids = [];
@@ -302,11 +287,28 @@ function mostrar_dashboard_assinantes($atts = []) {
     $pid_map = dash_get_product_map_for_subscriptions($subscription_table_ids);
     $pay_map = dash_fetch_payments_map(array_filter($subscriptionIDs));
 
+    // === OPTIONS DO SELECT: IDs únicos de product_id vindos do mapa ===
+$course_ids_set = [];
+if (!empty($pid_map)) {
+    foreach ($pid_map as $__sub_table_id => $__pid) {
+        $__pid = (int)$__pid;
+        if ($__pid > 0) { $course_ids_set[$__pid] = true; }
+    }
+}
+$course_ids_unique = array_keys($course_ids_set);
+sort($course_ids_unique, SORT_NUMERIC);
+
+$course_options = '<option value="">Todos</option>';
+foreach ($course_ids_unique as $__cid) {
+    $course_options .= '<option value="' . esc_attr($__cid) . '">' . esc_html($__cid) . '</option>';
+}
+
+
     $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
     $overdueStatuses = ['OVERDUE']; // 'INACTIVE' não implica atraso
     $mapPaid         = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
 
-    $grupos = [ 'em_dia' => [], 'em_atraso' => [], 'canceladas' => [] ];
+    $grupos = ['em_dia' => [], 'em_atraso' => [], 'canceladas' => []];
 
     foreach ($subs as $sub) {
         $subscription_pk_id = (int) ($sub['id'] ?? 0);
@@ -318,9 +320,7 @@ function mostrar_dashboard_assinantes($atts = []) {
         // FILTRO PELO ID DO CURSO (via shortcode)
         if ($filter_id) {
             $pid_base = dash_maybe_get_parent_product_id($pid_for_select);
-            if ((int)$pid_for_select !== (int)$filter_id && (int)$pid_base !== (int)$filter_base_id) {
-                continue;
-            }
+            if ((int)$pid_for_select !== (int)$filter_id && (int)$pid_base !== (int)$filter_base_id) continue;
         }
 
         $stat_raw = strtoupper(trim($sub['status'] ?? ''));
@@ -329,9 +329,7 @@ function mostrar_dashboard_assinantes($atts = []) {
         $payments = array_values($pay_map[$subscriptionID] ?? []);
 
         // se só tinha itens neutros (ou nenhum válido), e havia registros brutos, some
-        if ((isset($pay_map[$subscriptionID]) && empty($payments))) {
-            continue;
-        }
+        if ((isset($pay_map[$subscriptionID]) && empty($payments))) continue;
 
         if (in_array($stat_raw, $expiredStatuses, true)) {
             $grupos['canceladas'][] = ['sub' => $sub, 'payments' => $payments, 'product_id' => $pid_for_select];
@@ -351,10 +349,7 @@ function mostrar_dashboard_assinantes($atts = []) {
                 $isPaid  = in_array($p_stat, $mapPaid, true);
 
                 // Atraso real: status OVERDUE OU (não pago E dueDate < hoje)
-                if (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd))) {
-                    $hasOverdue = true;
-                    break;
-                }
+                if (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd))) { $hasOverdue = true; break; }
             }
         }
 
@@ -368,22 +363,22 @@ function mostrar_dashboard_assinantes($atts = []) {
     $cnt_canceladas = count($grupos['canceladas']);
     $cnt_total      = $cnt_dia + $cnt_atraso + $cnt_canceladas;
 
+    // Percentuais iniciais (para o 1º paint)
+    $pct_total      = $cnt_total > 0 ? 100 : 0;
+    $pct_dia        = $cnt_total > 0 ? round(($cnt_dia        / $cnt_total) * 100) : 0;
+    $pct_atraso     = $cnt_total > 0 ? round(($cnt_atraso     / $cnt_total) * 100) : 0;
+    $pct_canceladas = $cnt_total > 0 ? round(($cnt_canceladas / $cnt_total) * 100) : 0;
+
     // ===== CSS (mantendo paleta/estética atual) =====
     $css = '<style>
 :root{
   --dash-primary:#0a66c2; --dash-primary-dark:#084a8f;
   --dash-text:#1f2937; --dash-muted:#6b7280; --dash-border:#e5e7eb;
-
   /* Paleta de status */
-  --paid:#16a34a;        /* verde 600 */
-  --overdue:#e11d48;     /* rose 600 */
-  --pending:#f59e0b;     /* amber 500 */
-  --future:#e5e7eb;      /* cinza claro */
-  --box-border:rgba(0,0,0,.35);
+  --paid:#16a34a; --overdue:#e11d48; --pending:#f59e0b; --future:#e5e7eb; --box-border:rgba(0,0,0,.35);
 }
 .dash-wrap{font-family:Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; color:var(--dash-text)}
 .dash-h3{margin:24px 0 8px; font-size:1.125rem; font-weight:700}
-/* bordas mais grossas e sem cortar tooltip */
 .dash-table{width:100%; border-collapse:separate; border-spacing:0; margin:8px 0 24px; font-size:.95rem; box-shadow:0 1px 2px rgba(0,0,0,.04); border:2px solid #000; border-radius:10px; overflow:visible;}
 .dash-table thead th{background:var(--dash-primary); color:#fff; padding:10px 8px; text-transform:uppercase; font-weight:600; letter-spacing:.03em}
 .dash-table th, .dash-table td{padding:10px 8px; text-align:center; border-bottom:2px solid rgba(0,0,0,0.8); transition: background .15s ease, border-color .15s ease;}
@@ -403,68 +398,95 @@ function mostrar_dashboard_assinantes($atts = []) {
 .status-box.overdue{ background:var(--overdue); }
 .status-box.pending{
   background:#ff8c00;
-  background-image: repeating-linear-gradient(
-    45deg,
-    rgba(255,255,255,.34) 0 2px,rgba(255,255,255,0) 2px 6px
-  );
+  background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.34) 0 2px,rgba(255,255,255,0) 2px 6px);
   background-clip: padding-box;
 }
 .status-box.future{ background:var(--future); border-style:dashed; }
 .status-box[data-tooltip]:hover::after{content:attr(data-tooltip); position:absolute; bottom: calc(100% + 8px); left:50%; transform:translateX(-50%); background:rgba(17,24,39,.96); color:#fff; padding:8px 10px; border-radius:6px; white-space:pre; font-size:.8em; line-height:1.3; max-width:20rem; text-align:left; z-index:9999; pointer-events:none;}
 .status-box[data-tooltip]:hover::before{content:""; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:6px solid transparent; border-top-color:rgba(17,24,39,.96);}
 .debug-info{display:none !important;}
-
-/* === RESUMO (novo), baseado na estética atual === */
-.dash-summary{display:grid; grid-template-columns: repeat(4,minmax(140px,1fr)); gap:10px; margin:12px 0 8px;}
 .dash-kpi{border:2px solid #000; border-radius:10px; padding:10px 12px; background:#fafafa; box-shadow:0 1px 2px rgba(0,0,0,.04);}
 .dash-kpi .dash-kpi-label{font-size:.82rem; color:#374151; text-transform:uppercase; letter-spacing:.03em}
-.dash-kpi .dash-kpi-value{font-weight:800; font-size:1.35rem; display:flex; align-items:baseline; gap:6px;}
-.dash-kpi .dash-kpi-value small{font-size:.9rem; color:var(--dash-muted);}
-.dash-kpi.emdia   .dash-kpi-value{color:var(--paid);}
-.dash-kpi.atraso  .dash-kpi-value{color:var(--overdue);}
-.dash-kpi.cancel  .dash-kpi-value{color:#111827;}
+.dash-kpi .dash-kpi-value{display:flex; flex-direction:column; align-items:flex-start; gap:2px;}
+.dash-kpi .dash-kpi-perc{font-weight:900; font-size:1.8rem; line-height:1;}
+.dash-kpi .dash-kpi-abs{font-size:.85rem; color:var(--dash-muted);}
+.dash-kpi.emdia   .dash-kpi-perc{color:var(--paid);}
+.dash-kpi.atraso  .dash-kpi-perc{color:var(--overdue);}
+.dash-kpi.cancel  .dash-kpi-perc{color:#111827;}
 .dash-summary-note{margin:6px 0 0; font-size:.9rem; color:#374151;}
+.dash-summary{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:8px 0 10px; align-items:stretch;}
+@media (max-width:980px){ .dash-summary{ grid-template-columns:repeat(2,1fr);} }
+@media (max-width:560px){ .dash-summary{ grid-template-columns:1fr; } }
+.dash-kpi{ display:flex; flex-direction:column; gap:6px; }
+.dash-kpi-bar{width:100%; height:8px; background:#eef2f7; border-radius:6px; overflow:hidden; border:1px solid var(--dash-border);}
+.dash-kpi-bar > span{ display:block; height:100%; width:0%; transition:width .25s ease; }
+.dash-kpi.total  .dash-kpi-bar > span{ background:var(--dash-primary); }
+.dash-kpi.emdia  .dash-kpi-bar > span{ background:var(--paid); }
+.dash-kpi.atraso .dash-kpi-bar > span{ background:var(--overdue); }
+.dash-kpi.cancel .dash-kpi-bar > span{ background:#111827; }
+.dash-composition{ margin:2px 0 8px; }
+.dash-stacked{display:flex; width:100%; height:10px; border-radius:6px; overflow:hidden; border:1px solid var(--dash-border); background:#eef2f7;}
+.dash-stacked .seg{ display:block; height:100%; width:0%; transition:width .25s ease; }
+.seg-dia{ background:var(--paid); } .seg-atraso{ background:var(--overdue); } .seg-cancel{ background:#111827; }
+.dash-comp-label{ font-size:.8rem; color:var(--dash-muted); margin-top:4px; }
+.dash-select{ flex:0 0 180px; max-width:220px; }
+.dash-select.dash-input{ padding-right:28px; }
 </style>';
 
     // ===== RESUMO (antes da busca e do dashboard) =====
     $summary = '
 <div class="dash-summary" role="region" aria-label="Resumo das assinaturas">
-  <div class="dash-kpi total">
+  <div class="dash-kpi total" role="status" aria-live="polite">
     <div class="dash-kpi-label">Assinaturas</div>
     <div class="dash-kpi-value">
-      <span id="kpi-total-now">'.(int)$cnt_total.'</span>
-      <small>/ '.(int)$cnt_total.'</small>
+      <span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span>
+      <small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small>
     </div>
+    <div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div>
   </div>
-  <div class="dash-kpi emdia">
+  <div class="dash-kpi emdia" role="status" aria-live="polite">
     <div class="dash-kpi-label">Em Dia</div>
     <div class="dash-kpi-value">
-      <span id="kpi-dia-now">'.(int)$cnt_dia.'</span>
-      <small>/ '.(int)$cnt_dia.'</small>
+      <span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span>
+      <small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small>
     </div>
+    <div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div>
   </div>
-  <div class="dash-kpi atraso">
+  <div class="dash-kpi atraso" role="status" aria-live="polite">
     <div class="dash-kpi-label">Em Atraso</div>
     <div class="dash-kpi-value">
-      <span id="kpi-atraso-now">'.(int)$cnt_atraso.'</span>
-      <small>/ '.(int)$cnt_atraso.'</small>
+      <span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span>
+      <small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small>
     </div>
+    <div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div>
   </div>
-  <div class="dash-kpi cancel">
+  <div class="dash-kpi cancel" role="status" aria-live="polite">
     <div class="dash-kpi-label">Canceladas</div>
     <div class="dash-kpi-value">
-      <span id="kpi-cancel-now">'.(int)$cnt_canceladas.'</span>
-      <small>/ '.(int)$cnt_canceladas.'</small>
+      <span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span>
+      <small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small>
     </div>
+    <div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div>
   </div>
+</div>
+<div class="dash-composition" aria-label="Composição por status (visível)">
+  <div class="dash-stacked">
+    <span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span>
+    <span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span>
+    <span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span>
+  </div>
+  <div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div>
 </div>
 <div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
 
-    // ===== Busca (nome/email/CPF) — agora vem após o resumo =====
     $search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes">
+        <select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'
+        . $course_options .
+        '</select>
         <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
         <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
     </div>';
+
 
     // ===== Legenda visual =====
     $legend = '
@@ -485,15 +507,11 @@ function mostrar_dashboard_assinantes($atts = []) {
         $cycles = null;
         if ($product_id) {
             $cycles = dash_get_subscription_cycles_from_product($product_id);
-            if ($cycles !== null) {
-                $totalInstallments = ($cycles > 0) ? (int) $cycles : max(count($payments), 6);
-            }
+            if ($cycles !== null) $totalInstallments = ($cycles > 0) ? (int) $cycles : max(count($payments), 6);
         }
         if ((!$product_id || $cycles === null) && !empty($sub['order_id'])) {
             $maybe_cycles = dash_get_cycles_from_wc_subscription_order($sub['order_id']);
-            if ($maybe_cycles !== null) {
-                $totalInstallments = ($maybe_cycles > 0) ? (int) $maybe_cycles : max(count($payments), 6);
-            }
+            if ($maybe_cycles !== null) $totalInstallments = ($maybe_cycles > 0) ? (int) $maybe_cycles : max(count($payments), 6);
         }
         if (count($payments) > $totalInstallments) $totalInstallments = count($payments);
 
@@ -501,9 +519,7 @@ function mostrar_dashboard_assinantes($atts = []) {
         $installments = array_fill(0, $totalInstallments, null);
         foreach ($payments as $p) {
             $idx = (isset($p['installmentNumber']) && is_numeric($p['installmentNumber'])) ? ((int)$p['installmentNumber'] - 1) : null;
-            if ($idx === null || $idx < 0 || $idx >= $totalInstallments) {
-                $idx = array_search(null, $installments, true);
-            }
+            if ($idx === null || $idx < 0 || $idx >= $totalInstallments) $idx = array_search(null, $installments, true);
             if ($idx !== false) $installments[$idx] = $p;
         }
 
@@ -520,10 +536,7 @@ function mostrar_dashboard_assinantes($atts = []) {
         $r .= '<td>';
         foreach ($installments as $p) {
             // defaults: slot ainda não criado
-            $cls = 'future';
-            $pag = '—';
-            $status_tip = 'Não criada';
-            $tooltip = 'Parcela não criada';
+            $cls = 'future'; $pag = '—'; $status_tip = 'Não criada'; $tooltip = 'Parcela não criada';
 
             if ($p) {
                 $val     = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : '0,00';
@@ -541,17 +554,11 @@ function mostrar_dashboard_assinantes($atts = []) {
                 $isOverdue = (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd)));
 
                 if ($isPaid) {
-                    $cls = 'paid';
-                    $pag = date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? ''));
-                    $status_tip = 'Pago';
+                    $cls = 'paid'; $pag = date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? '')); $status_tip = 'Pago';
                 } elseif ($isOverdue) {
-                    $cls = 'overdue';
-                    $pag = 'ATRASADA';
-                    $status_tip = 'Em atraso';
+                    $cls = 'overdue'; $pag = 'ATRASADA'; $status_tip = 'Em atraso';
                 } else {
-                    // existe parcela, não paga e ainda não venceu => laranja
-                    $cls = 'pending';
-                    $status_tip = 'Pendente';
+                    $cls = 'pending'; $status_tip = 'Pendente';
                 }
 
                 // tooltip completo quando existe parcela
@@ -594,22 +601,31 @@ function mostrar_dashboard_assinantes($atts = []) {
     }
 
     // ===== JS: filtro em tempo real + atualização do resumo =====
-    $html .= "<script>
+$html .= "<script>
 (function(){
+  var $ = function(id){ return document.getElementById(id); };
+
   function normalize(s){
     return (s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase();
   }
 
   function countVisibleRows(tableId){
-    var t = document.getElementById(tableId);
-    if(!t) return 0;
-    var rows = t.querySelectorAll('tbody tr[id^=\"sub-\"]');
+    var t = $(tableId); if(!t) return 0;
+    var rows = t.querySelectorAll('tbody tr[id]');
     var n = 0;
     rows.forEach(function(r){
-      if(r.style.display !== 'none'){ n++; }
+      var rid = r.id || '';
+      if(rid.slice(0,4) === 'sub-' && r.style.display !== 'none'){ n++; }
     });
     return n;
   }
+
+  function setText(id, txt){ var el = $(id); if(el){ el.textContent = txt; } }
+  function setBar(id, pct){
+    var el = $(id);
+    if(el){ el.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
+  }
+  function pct(part, total){ return total ? Math.round((part/total)*100) : 0; }
 
   function updateSummary(){
     var visDia   = countVisibleRows('dash-table-em_dia');
@@ -617,50 +633,83 @@ function mostrar_dashboard_assinantes($atts = []) {
     var visCanc  = countVisibleRows('dash-table-canceladas');
     var visTotal = visDia + visAtr + visCanc;
 
-    var el;
-    if((el = document.getElementById('kpi-dia-now')))      el.textContent = visDia;
-    if((el = document.getElementById('kpi-atraso-now')))   el.textContent = visAtr;
-    if((el = document.getElementById('kpi-cancel-now')))   el.textContent = visCanc;
-    if((el = document.getElementById('kpi-total-now')))    el.textContent = visTotal;
+    var pDia = pct(visDia,  visTotal);
+    var pAtr = pct(visAtr,  visTotal);
+    var pCan = pct(visCanc, visTotal);
 
-    if((el = document.getElementById('dash-summary-note'))) {
-      var totalStatic = ".(int)$cnt_total.";
-      el.textContent = 'Mostrando ' + visTotal + ' de ' + totalStatic + ' assinaturas';
-    }
+    setText('kpi-total-perc',  (visTotal>0 ? '100%' : '0%'));
+    setText('kpi-dia-perc',    pDia + '%');
+    setText('kpi-atraso-perc', pAtr + '%');
+    setText('kpi-cancel-perc', pCan + '%');
+
+    setText('kpi-total-abs',   visTotal + ' assinaturas');
+    setText('kpi-dia-abs',     visDia   + ' de ' + visTotal);
+    setText('kpi-atraso-abs',  visAtr   + ' de ' + visTotal);
+    setText('kpi-cancel-abs',  visCanc  + ' de ' + visTotal);
+
+    setBar('bar-total',  visTotal>0 ? 100 : 0);
+    setBar('bar-dia',    pDia);
+    setBar('bar-atraso', pAtr);
+    setBar('bar-cancel', pCan);
+
+    setBar('seg-dia',    pDia);
+    setBar('seg-atraso', pAtr);
+    setBar('seg-cancel', pCan);
   }
 
-  function doFilter(){
-    var q = normalize(document.getElementById('dash-search-input').value.trim());
-    document.querySelectorAll('.dash-table tbody tr').forEach(function(tr){
-      var c = tr.cells; if(!c||c.length<3){ tr.style.display=''; return; }
+  function applyFilter(){
+    var inp = $('dash-search-input');
+    var sel = $('dash-course-filter');
+    var q = normalize(inp ? inp.value.trim() : '');
+    var selectedId = sel ? String(sel.value || '').toLowerCase() : '';
+
+    document.querySelectorAll('.dash-table tbody tr[id]').forEach(function(tr){
+      var c = tr.cells; if(!c || c.length < 3){ tr.style.display = ''; return; }
+
       var nome  = normalize(c[0].textContent);
       var email = normalize(c[1].textContent);
       var cpf   = normalize(c[2].textContent);
 
-      /* também permite buscar pelo id do <tr> e pelos data-attributes */
       var rid   = (tr.id||'').toLowerCase();
       var cid   = String(tr.getAttribute('data-course-id')||'').toLowerCase();
       var cbase = String(tr.getAttribute('data-course-base-id')||'').toLowerCase();
 
-      tr.style.display = (
-        q=== '' ||
-        nome.includes(q) || email.includes(q) || cpf.includes(q) ||
-        rid.includes(q) || cid.includes(q) || cbase.includes(q)
-      ) ? '' : 'none';
+      var matchText = (
+        q === '' ||
+        nome.indexOf(q)  > -1 ||
+        email.indexOf(q) > -1 ||
+        cpf.indexOf(q)   > -1 ||
+        rid.indexOf(q)   > -1 ||
+        cid.indexOf(q)   > -1 ||
+        cbase.indexOf(q) > -1
+      );
+
+      var matchId = (selectedId === '' || cid === selectedId || cbase === selectedId);
+
+      tr.style.display = (matchText && matchId) ? '' : 'none';
     });
 
-    updateSummary(); // >>> atualiza o resumo na hora da filtragem
+    updateSummary();
   }
 
-  /* >>> SOMENTE pelo botão (sem filtrar ao digitar/Enter) */
-  var btn = document.getElementById('dash-search-btn');
-  if(btn){ btn.addEventListener('click', doFilter); }
+  var btn = $('dash-search-btn');
+  if(btn){ btn.addEventListener('click', applyFilter); }
 
-  // Ajusta o resumo no carregamento inicial (sem filtro)
+  var inp = $('dash-search-input');
+  if(inp){
+    inp.addEventListener('keydown', function(e){ if(e.key === 'Enter'){ applyFilter(); } });
+    inp.addEventListener('input', applyFilter);
+  }
+
+  var sel = $('dash-course-filter');
+  if(sel){ sel.addEventListener('change', applyFilter); }
+
+  // 1º paint (sem filtro) — KPIs corretos
   updateSummary();
 })();
 </script>
 </div>";
+
 
     return $html;
 }
