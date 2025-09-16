@@ -298,10 +298,23 @@ if (!empty($pid_map)) {
 $course_ids_unique = array_keys($course_ids_set);
 sort($course_ids_unique, SORT_NUMERIC);
 
+// Opções do select com NOME do produto (value continua sendo o ID)
 $course_options = '<option value="">Todos</option>';
 foreach ($course_ids_unique as $__cid) {
-    $course_options .= '<option value="' . esc_attr($__cid) . '">' . esc_html($__cid) . '</option>';
+    $display_id = dash_maybe_get_parent_product_id($__cid); // pega o pai se for variação
+    $name = '';
+
+    if (function_exists('wc_get_product')) {
+        $p = wc_get_product($display_id);
+        if ($p) { $name = $p->get_name(); }
+    }
+    if (!$name) { $name = get_post_field('post_title', $display_id); } // fallback
+    if (!$name) { $name = 'Produto #' . $__cid; } // último fallback
+
+    // value segue com o ID numérico, label mostra o nome
+    $course_options .= '<option value="' . esc_attr($__cid) . '">' . esc_html($name) . '</option>';
 }
+
 
 
     $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
@@ -404,6 +417,35 @@ foreach ($course_ids_unique as $__cid) {
 .status-box.future{ background:var(--future); border-style:dashed; }
 .status-box[data-tooltip]:hover::after{content:attr(data-tooltip); position:absolute; bottom: calc(100% + 8px); left:50%; transform:translateX(-50%); background:rgba(17,24,39,.96); color:#fff; padding:8px 10px; border-radius:6px; white-space:pre; font-size:.8em; line-height:1.3; max-width:20rem; text-align:left; z-index:9999; pointer-events:none;}
 .status-box[data-tooltip]:hover::before{content:""; position:absolute; bottom:100%; left:50%; transform:translateX(-50%); border:6px solid transparent; border-top-color:rgba(17,24,39,.96);}
+
+/* Tooltip de linha (TR) — robusto (não desloca layout) */
+.dash-table tbody tr[id]{ position: relative; z-index: 1; }
+
+.dash-table tbody tr[data-tooltip]:hover::after{
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  /* visual igual às .status-box */
+  background: rgba(17,24,39,.96);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 6px;
+  box-sizing: border-box;
+  /* >>> correções de quebra e limite */
+  white-space: pre-wrap;          /* preserva \n mas permite quebrar em espaços */
+  overflow-wrap: anywhere;        /* quebra palavras muito longas */
+  word-break: normal;
+  max-width: min(26rem, calc(100% - 24px)); /* não passa do TR nem da viewport */
+  text-align: left;
+  font-size: .8em;
+  line-height: 1.3;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+
 .debug-info{display:none !important;}
 .dash-kpi{border:2px solid #000; border-radius:10px; padding:10px 12px; background:#fafafa; box-shadow:0 1px 2px rgba(0,0,0,.04);}
 .dash-kpi .dash-kpi-label{font-size:.82rem; color:#374151; text-transform:uppercase; letter-spacing:.03em}
@@ -479,13 +521,13 @@ foreach ($course_ids_unique as $__cid) {
 </div>
 <div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
 
-    $search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes">
-        <select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'
-        . $course_options .
-        '</select>
+$search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes">
+        <select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'.$course_options.'</select>
         <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
         <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
+        <button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button>
     </div>';
+
 
 
     // ===== Legenda visual =====
@@ -609,6 +651,11 @@ $html .= "<script>
     return (s||'').normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase();
   }
 
+  // Mantém só dígitos (para CPF com/sem máscara)
+  function digitsOnly(s){
+    return String(s||'').replace(/\\D+/g,'');
+  }
+
   function countVisibleRows(tableId){
     var t = $(tableId); if(!t) return 0;
     var rows = t.querySelectorAll('tbody tr[id]');
@@ -621,10 +668,7 @@ $html .= "<script>
   }
 
   function setText(id, txt){ var el = $(id); if(el){ el.textContent = txt; } }
-  function setBar(id, pct){
-    var el = $(id);
-    if(el){ el.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
-  }
+  function setBar(id, pct){ var el = $(id); if(el){ el.style.width = Math.max(0, Math.min(100, pct)) + '%'; } }
   function pct(part, total){ return total ? Math.round((part/total)*100) : 0; }
 
   function updateSummary(){
@@ -657,32 +701,70 @@ $html .= "<script>
     setBar('seg-cancel', pCan);
   }
 
+  function getCourseNameById(val){
+    var s = document.getElementById('dash-course-filter');
+    if(!s) return '';
+    val = String(val || '');
+    for(var i=0;i<s.options.length;i++){
+      if(s.options[i].value === val){
+        return s.options[i].textContent || s.options[i].innerText || s.options[i].text || '';
+      }
+    }
+    return '';
+  }
+
+  function setRowTooltips(){
+    var rows = document.querySelectorAll('.dash-table tbody tr[id]');
+    rows.forEach(function(tr){
+      var cid   = String(tr.getAttribute('data-course-id') || '');
+      var cbase = String(tr.getAttribute('data-course-base-id') || '');
+      var name  = getCourseNameById(cid) || getCourseNameById(cbase);
+
+      if(name){
+        tr.setAttribute('data-tooltip', 'Curso: ' + name);
+        tr.removeAttribute('title'); // evita tooltip nativo
+      }else{
+        tr.removeAttribute('data-tooltip');
+        tr.removeAttribute('title');
+      }
+    });
+  }
+
   function applyFilter(){
     var inp = $('dash-search-input');
     var sel = $('dash-course-filter');
-    var q = normalize(inp ? inp.value.trim() : '');
+
+    // Query nas duas formas: normalizada e só-dígitos (para CPF)
+    var rawQ    = inp ? inp.value.trim() : '';
+    var q       = normalize(rawQ);
+    var qDigits = digitsOnly(rawQ);
+
     var selectedId = sel ? String(sel.value || '').toLowerCase() : '';
 
     document.querySelectorAll('.dash-table tbody tr[id]').forEach(function(tr){
       var c = tr.cells; if(!c || c.length < 3){ tr.style.display = ''; return; }
 
-      var nome  = normalize(c[0].textContent);
-      var email = normalize(c[1].textContent);
-      var cpf   = normalize(c[2].textContent);
+      var nome      = normalize(c[0].textContent);
+      var email     = normalize(c[1].textContent);
+
+      // CPF: texto normalizado + versão apenas dígitos
+      var cpfText   = c[2].textContent || '';
+      var cpfNorm   = normalize(cpfText);
+      var cpfDigits = digitsOnly(cpfText);
 
       var rid   = (tr.id||'').toLowerCase();
       var cid   = String(tr.getAttribute('data-course-id')||'').toLowerCase();
       var cbase = String(tr.getAttribute('data-course-base-id')||'').toLowerCase();
 
-      var matchText = (
-        q === '' ||
-        nome.indexOf(q)  > -1 ||
-        email.indexOf(q) > -1 ||
-        cpf.indexOf(q)   > -1 ||
-        rid.indexOf(q)   > -1 ||
-        cid.indexOf(q)   > -1 ||
-        cbase.indexOf(q) > -1
-      );
+      var matchText =
+        (q === '') ||
+        (nome.indexOf(q)  > -1) ||
+        (email.indexOf(q) > -1) ||
+        (cpfNorm.indexOf(q) > -1) ||                   // CPF com máscara
+        (qDigits && cpfDigits.indexOf(qDigits) > -1) ||// CPF sem máscara
+        (rid.indexOf(q)   > -1) ||
+        (cid.indexOf(q)   > -1) ||
+        (cbase.indexOf(q) > -1);
 
       var matchId = (selectedId === '' || cid === selectedId || cbase === selectedId);
 
@@ -692,24 +774,39 @@ $html .= "<script>
     updateSummary();
   }
 
+  // <<< AGORA SÓ FILTRA AO CLICAR NO BOTÃO >>>
   var btn = $('dash-search-btn');
   if(btn){ btn.addEventListener('click', applyFilter); }
 
-  var inp = $('dash-search-input');
-  if(inp){
-    inp.addEventListener('keydown', function(e){ if(e.key === 'Enter'){ applyFilter(); } });
-    inp.addEventListener('input', applyFilter);
-  }
+  // Limpa filtros: texto, select e mostra todas as linhas
+function clearFilter(){
+  var inp = $('dash-search-input'); if(inp){ inp.value = ''; }
+  var sel = $('dash-course-filter'); if(sel){ sel.value = ''; }
 
-  var sel = $('dash-course-filter');
-  if(sel){ sel.addEventListener('change', applyFilter); }
+  // mostra todas as linhas
+  document.querySelectorAll('.dash-table tbody tr[id]').forEach(function(tr){
+    tr.style.display = '';
+  });
+
+  // atualiza KPIs/barras
+  updateSummary();
+
+  // opcional: foca o campo de busca
+  if(inp){ inp.focus(); }
+}
+
+var clr = $('dash-clear-btn');
+if(clr){ clr.addEventListener('click', clearFilter); }
+
+
+  // Tooltips com o nome do curso nas linhas
+  setRowTooltips();
 
   // 1º paint (sem filtro) — KPIs corretos
   updateSummary();
 })();
 </script>
 </div>";
-
 
     return $html;
 }
