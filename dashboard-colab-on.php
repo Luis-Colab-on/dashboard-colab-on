@@ -40,7 +40,14 @@ function dash_fetch_all_asaas_subscriptions() {
     $payments_table = $wpdb->prefix . 'processa_pagamentos_asaas';
     $users_table    = $wpdb->users;
 
-    // Mantemos s.* para evitar risco de faltar colunas usadas nos fallbacks (ex.: cancelledAt/expiredAt/updated)
+    $IGNORED_EMAILS = array_map('strtolower', [
+        'mwry5467@gmail.com',
+        'financeiro4@colab-on.com.br',
+        'financeiro@colab-on.com.br',
+        'jessica@colab-on.com.br',
+        'david.forli@colab-on.com.br',
+    ]);
+
     $sql = "
         SELECT
             s.*,
@@ -68,9 +75,25 @@ function dash_fetch_all_asaas_subscriptions() {
         LEFT JOIN {$users_table} u2 ON u2.ID = p.alt_user_id
         ORDER BY s.id DESC
     ";
+
     $rows = $wpdb->get_results($sql, ARRAY_A);
-    return is_array($rows) ? $rows : [];
+    if (!is_array($rows)) {
+        return [];
+    }
+
+    // Filtro pós-consulta: remove linhas com e-mails indesejados
+    $rows = array_values(array_filter($rows, function($r) use ($IGNORED_EMAILS) {
+        $email = strtolower(trim($r['customer_email'] ?? ''));
+        if ($email === '') {
+            // Sem e-mail resolvido: mantém (não é um dos testes explicitamente)
+            return true;
+        }
+        return !in_array($email, $IGNORED_EMAILS, true);
+    }));
+
+    return $rows;
 }
+
 
 /**
  * Mapeia product_id para várias assinaturas de uma só vez para reduzir roundtrips.
@@ -336,8 +359,8 @@ function mostrar_dashboard_assinantes($atts = []) {
     $pct_atraso = $cnt_total > 0 ? round(($cnt_atraso / $cnt_total) * 100) : 0;
     $pct_canceladas = $cnt_total > 0 ? round(($cnt_canceladas / $cnt_total) * 100) : 0;
 
-    // ===== CSS (uma linha por seletor) [+ foco visível nas caixas para acessibilidade/suavidade; estética preservada] =====
-    $css = '<style>
+// ===== CSS =====
+$css = '<style>
 :root{--dash-primary:#0a66c2;--dash-primary-dark:#084a8f;--dash-text:#1f2937;--dash-muted:#6b7280;--dash-border:#e5e7eb;--paid:#16a34a;--overdue:#e11d48;--pending:#f59e0b;--future:#e5e7eb;--box-border:rgba(0,0,0,.35);}
 .dash-wrap{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";color:var(--dash-text);}
 .dash-h3{margin:24px 0 8px;font-size:1.125rem;font-weight:700;}
@@ -395,14 +418,36 @@ function mostrar_dashboard_assinantes($atts = []) {
 .dash-select.dash-input{padding-right:28px;}
 </style>';
 
+$css_extra = '<style>
+/* Esconde parcelas fora do mês escolhido e/ou a linha inteira quando aplicável */
+.month-dim-hide { display:none !important; }
+.month-filter-hide { display:none !important; }
+/* Datepicker em modo mês/ano (esconde os dias) */
+.ui-datepicker .ui-datepicker-calendar { display:none; }
+.ui-datepicker .ui-datepicker-current { display:none; }
+.ui-state-disabled { opacity:.45; pointer-events:none; }
+</style>';
+
+$css .= $css_extra;
+
+
     // ===== RESUMO (compacto) =====
     $summary = '<div class="dash-summary" role="region" aria-label="Resumo das assinaturas"><div class="dash-kpi total" role="status" aria-live="polite"><div class="dash-kpi-label">Assinaturas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span><small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div></div><div class="dash-kpi emdia" role="status" aria-live="polite"><div class="dash-kpi-label">Em Dia</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span><small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div></div><div class="dash-kpi atraso" role="status" aria-live="polite"><div class="dash-kpi-label">Em Atraso</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span><small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div></div><div class="dash-kpi cancel" role="status" aria-live="polite"><div class="dash-kpi-label">Canceladas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span><small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div></div></div><div class="dash-composition" aria-label="Composição por status (visível)"><div class="dash-stacked"><span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span><span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span><span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span></div><div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div></div><div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
 
     // ===== Busca (compacto) =====
-    $search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes"><select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'.$course_options.'</select><input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF"><button type="button" id="dash-search-btn" class="dash-btn">Buscar</button><button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button></div>';
+    $search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes"><select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'.$course_options.'</select> 
+    <input type="text" id="dash-month-picker"
+       class="dash-input dash-select"
+       placeholder="Selecionar mês/ano"
+       aria-label="Selecionar mês e ano"
+       readonly> 
+       <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF"><button type="button" id="dash-search-btn" class="dash-btn">Buscar</button><button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button></div>';
 
     // ===== Legenda (compacto) =====
     $legend = '<div style="display:flex;gap:14px;align-items:center;margin:4px 0 10px;flex-wrap:wrap;font-size:.9rem;color:#374151"><span><span class="status-box paid" tabindex="0" aria-label="Pago"></span> Pago</span><span><span class="status-box overdue" tabindex="0" aria-label="Em atraso"></span> Em atraso</span><span><span class="status-box pending" tabindex="0" aria-label="Pendente"></span> Pendente</span><span><span class="status-box future" tabindex="0" aria-label="Não criada"></span> Não criada</span></div>';
+
+    // Inicia o HTML só AGORA
+  $html  = $css . $search . $legend;
 
     // ===== Tabela builder (sem mudar lógica) =====
     $build_row = function(array $sub, array $payments, int $product_id) use ($agora, $hojeYmd) {
@@ -435,27 +480,58 @@ function mostrar_dashboard_assinantes($atts = []) {
         $r .= '<td>'.esc_html($cpf_display).'</td>';
 
         $r .= '<td>';
-        foreach ($installments as $p) {
-            $cls='future'; $pag='—'; $status_tip='Não criada'; $tooltip='Parcela não criada';
-            if ($p) {
-                $val = isset($p['value']) ? number_format((float)$p['value'],2,',','.') : '0,00';
-                $creAt = $p['created'] ?? ($p['createdAt'] ?? '');
-                $created = $creAt ? date_i18n('d/m/Y - H:i', strtotime($creAt)) : '—';
-                $p_stat = strtoupper($p['paymentStatus'] ?? '');
-                $due_ts  = strtotime($p['dueDate'] ?? '');
-                $orig_ts = strtotime($p['originalDueDate'] ?? '');
-                $venc_ts = $due_ts ?: $orig_ts;
-                $venc = $venc_ts ? date_i18n('d/m/Y',$venc_ts) : '—';
-                $dueYmd = $venc_ts ? date_i18n('Y-m-d',$venc_ts) : null;
-                $isPaid = in_array($p_stat,['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'],true);
-                $isOverdue = (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd)));
-                if ($isPaid) { $cls='paid'; $pag=date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? '')); $status_tip='Pago'; }
-                elseif ($isOverdue) { $cls='overdue'; $pag='ATRASADA'; $status_tip='Em atraso'; }
-                else { $cls='pending'; $status_tip='Pendente'; }
-                $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created}\nVencimento: {$venc}\nPagamento: {$pag}";
-            }
-            $r .= '<span class="status-box '.esc_attr($cls).'" data-tooltip="'.esc_attr($tooltip).'" tabindex="0" aria-label="'.esc_attr($status_tip).'"></span>';
-        }
+foreach ($installments as $p) {
+    // Inicializações seguras para o caso de $p === null
+    $creAt = '';
+    $venc_ts = 0;
+    $pagto_raw = '';
+    $cls = 'future';
+    $status_tip = 'Não criada';
+    $tooltip = 'Parcela não criada';
+    $pag = '—';
+    $criacao_br = '';
+    $criacao_dmy = '';
+    $vencimento_br = '';
+    $pagamento_br = '';
+    $monthKey = '';
+    $dueYmd = '';
+
+    if ($p) {
+        $val = isset($p['value']) ? number_format((float)$p['value'],2,',','.') : '0,00';
+        $creAt = $p['created'] ?? ($p['createdAt'] ?? '');
+        $created = $creAt ? date_i18n('d/m/Y - H:i', strtotime($creAt)) : '—';
+        $p_stat = strtoupper($p['paymentStatus'] ?? '');
+        $due_ts  = strtotime($p['dueDate'] ?? '');
+        $orig_ts = strtotime($p['originalDueDate'] ?? '');
+        $venc_ts = $due_ts ?: $orig_ts;
+        $venc = $venc_ts ? date_i18n('d/m/Y',$venc_ts) : '—';
+        $dueYmd = $venc_ts ? date_i18n('Y-m-d',$venc_ts) : null;
+        $isPaid = in_array($p_stat,['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'],true);
+        $isOverdue = (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd)));
+        if ($isPaid) { $cls='paid'; $pag=date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? '')); $status_tip='Pago'; }
+        elseif ($isOverdue) { $cls='overdue'; $pag='ATRASADA'; $status_tip='Em atraso'; }
+        else { $cls='pending'; $status_tip='Pendente'; }
+        $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created}\nVencimento: {$venc}\nPagamento: {$pag}";
+    }
+
+    // Datas pt-BR para atributos data-* (não quebram se $p for null)
+    $criacao_br    = !empty($creAt)   ? date_i18n('d/m/Y - H:i', strtotime($creAt)) : '';
+    $criacao_dmy   = !empty($creAt)   ? date_i18n('d/m/Y',       strtotime($creAt)) : '';
+    $vencimento_br = !empty($venc_ts) ? date_i18n('d/m/Y',       $venc_ts)          : '';
+    $pagamento_br  = !empty($pagto_raw) ? date_i18n('d/m/Y',     strtotime($pagto_raw)) : '';
+    $monthKey      = !empty($venc_ts) ? date_i18n('Y-m',         $venc_ts)          : '';
+    $dueYmd        = !empty($venc_ts) ? date_i18n('Y-m-d',       $venc_ts)          : '';
+
+    $r .= '<span class="status-box '.esc_attr($cls).'"'
+        .' data-tooltip="'.esc_attr($tooltip).'"'
+        .' tabindex="0" aria-label="'.esc_attr($status_tip).'"'
+        .' data-de-criacao="'.esc_attr($criacao_br).'"'
+        .' data-de-vencimento="'.esc_attr($vencimento_br).'"'
+        .' data-de-pagamento="'.esc_attr($pagamento_br).'"'
+        .' data-month="'.esc_attr($monthKey).'"'
+        .' data-date="'.esc_attr($dueYmd).'"'
+        .'></span>';
+}
         $r .= '</td>';
 
         $stat = strtoupper(trim($sub['status'] ?? ''));
@@ -484,15 +560,85 @@ function mostrar_dashboard_assinantes($atts = []) {
     }
 
     // ===== JS (otimizado de forma conservadora; sem alterar UX/resultado) =====
-    $html .= "<script>
+
+ob_start();
+?>
+<script>
 (function(){
-  var $=function(id){return document.getElementById(id);};
-  function normalize(s){return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();}
-  function digitsOnly(s){return String(s||'').replace(/\D+/g,'');}
+  // Utils
+  var $ = function(id){ return document.getElementById(id); };
+  function normalize(s){ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+  function digitsOnly(s){ return String(s||'').replace(/\D+/g,''); }
+
+  // ====== mês selecionado (YYYY-MM) ======
+  function getSelectedMonth(){
+    var el = $('dash-month-picker');
+    return el ? String(el.value||'').trim() : '';
+  }
+
+  // 'dd/mm/yyyy' ou 'dd/mm/yyyy - HH:ii' -> 'YYYY-MM'
+  function brDateToYm(s){
+    if(!s) return '';
+    var m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if(!m) return '';
+    var mm = ('0'+parseInt(m[2],10)).slice(-2);
+    return String(m[3])+'-'+mm;
+  }
+
+  // ====== mês da BOX por CRIAÇÃO (exclusivo) ======
+  function getBoxCreationYM(box){
+    var createdBR = box.getAttribute('data-de-criacao') || '';
+    return brDateToYm(createdBR); // se não tiver criação válida, retorna ''
+  }
+
+  // ====== cache e restauração de estado original ======
+  function captureOriginalOnce(box){
+    if(box.dataset && box.dataset._captured==='1') return;
+    var origStatus = 'future';
+    if(box.classList.contains('paid')) origStatus='paid';
+    else if(box.classList.contains('overdue')) origStatus='overdue';
+    else if(box.classList.contains('pending')) origStatus='pending';
+    else if(box.classList.contains('future')) origStatus='future';
+
+    box.dataset.origStatus  = origStatus;
+    box.dataset.origTooltip = box.getAttribute('data-tooltip') || '';
+    box.dataset.origAria    = box.getAttribute('aria-label') || '';
+    box.dataset._captured   = '1';
+  }
+  function restoreOriginal(box){
+    var s = (box.dataset && box.dataset.origStatus) ? box.dataset.origStatus : 'future';
+    setStatus(box, s);
+    if(box.dataset){
+      var tt = box.dataset.origTooltip || '';
+      var al = box.dataset.origAria || '';
+      if(tt) box.setAttribute('data-tooltip', tt); else box.removeAttribute('data-tooltip');
+      if(al) box.setAttribute('aria-label', al); else box.removeAttribute('aria-label');
+    }
+    box.removeAttribute('title');
+    box.classList.remove('muted-future');
+  }
+
+  function setStatus(box, status){
+    box.classList.remove('paid','overdue','pending','future');
+    box.classList.add(status);
+  }
+
+  // ====== “Mutar” box fora do mês: future + sem dados visíveis ======
+  function muteAsFuture(box){
+    setStatus(box, 'future');
+    // zera tooltip/aria (sem perder os originais, que estão no dataset)
+    box.setAttribute('data-tooltip','');
+    box.setAttribute('aria-label','Sem dados');
+    box.removeAttribute('title');
+    box.classList.add('muted-future');
+  }
+
+  // ====== KPIs ======
   function countVisibleRows(tableId){
     var t=$(tableId); if(!t) return 0;
-    var rows=t.querySelectorAll('tbody tr[id]'); var n=0;
-    rows.forEach(function(r){var rid=r.id||'';if(rid.slice(0,4)==='sub-'&&r.style.display!=='none'){n++;}});
+    var rows=t.querySelectorAll('tbody tr[id^="sub-"]');
+    var n=0;
+    rows.forEach(function(r){ if(r.style.display!=='none') n++; });
     return n;
   }
   function setText(id,txt){var el=$(id); if(el){el.textContent=txt;}}
@@ -504,17 +650,26 @@ function mostrar_dashboard_assinantes($atts = []) {
     var visCanc=countVisibleRows('dash-table-canceladas');
     var visTotal=visDia+visAtr+visCanc;
     var pDia=pct(visDia,visTotal), pAtr=pct(visAtr,visTotal), pCan=pct(visCanc,visTotal);
+
     setText('kpi-total-perc',(visTotal>0?'100%':'0%'));
     setText('kpi-dia-perc',pDia+'%'); setText('kpi-atraso-perc',pAtr+'%'); setText('kpi-cancel-perc',pCan+'%');
     setText('kpi-total-abs',visTotal+' assinaturas');
     setText('kpi-dia-abs',visDia+' de '+visTotal);
     setText('kpi-atraso-abs',visAtr+' de '+visTotal);
     setText('kpi-cancel-abs',visCanc+' de '+visTotal);
-    setBar('bar-total',visTotal>0?100:0); setBar('bar-dia',pDia); setBar('bar-atraso',pAtr); setBar('bar-cancel',pCan);
-    setBar('seg-dia',pDia); setBar('seg-atraso',pAtr); setBar('seg-cancel',pCan);
-  }
 
-  // Mapa value->label do select de cursos (evita varrer options repetidamente)
+    setBar('bar-total',visTotal>0?100:0);
+    setBar('bar-dia',pDia);
+    setBar('bar-atraso',pAtr);
+    setBar('bar-cancel',pCan);
+
+    setBar('seg-dia',pDia);
+    setBar('seg-atraso',pAtr);
+    setBar('seg-cancel',pCan);
+  }
+  window.updateSummary = updateSummary;
+
+  // ====== map p/ tooltip de linha ======
   var courseMap=(function(){
     var s=$('dash-course-filter'), map={};
     if(s){ for(var i=0;i<s.options.length;i++){ var opt=s.options[i]; map[String(opt.value||'')]=opt.textContent||opt.innerText||opt.text||''; } }
@@ -523,7 +678,7 @@ function mostrar_dashboard_assinantes($atts = []) {
   function getCourseNameById(val){ return courseMap[String(val||'')]||''; }
 
   function setRowTooltips(){
-    var rows=document.querySelectorAll('.dash-table tbody tr[id]');
+    var rows=document.querySelectorAll('.dash-table tbody tr[id^="sub-"]');
     rows.forEach(function(tr){
       var cid=String(tr.getAttribute('data-course-id')||'');
       var cbase=String(tr.getAttribute('data-course-base-id')||'');
@@ -533,42 +688,208 @@ function mostrar_dashboard_assinantes($atts = []) {
     });
   }
 
-  // Captura uma vez as linhas (DOM estático)
-  var ROWS=[].slice.call(document.querySelectorAll('.dash-table tbody tr[id]'));
+  // ====== snapshot das linhas ======
+  var ROWS=[].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
 
+  // ====== FILTRO: texto/curso + MÊS (por CRIAÇÃO) ======
   function applyFilter(){
     var inp=$('dash-search-input'), sel=$('dash-course-filter');
-    var rawQ=inp?inp.value.trim():'', q=normalize(rawQ), qDigits=digitsOnly(rawQ);
+    var rawQ=inp?inp.value.trim():'';
+    var q=normalize(rawQ), qDigits=digitsOnly(rawQ);
     var selectedId=sel?String(sel.value||'').toLowerCase():'';
+    var selectedMonth=getSelectedMonth(); // '' ou 'YYYY-MM'
+
     ROWS.forEach(function(tr){
       var c=tr.cells; if(!c||c.length<3){ tr.style.display=''; return; }
+
+      // texto/curso
       var nome=normalize(c[0].textContent), email=normalize(c[1].textContent);
       var cpfText=c[2].textContent||'', cpfNorm=normalize(cpfText), cpfDigits=digitsOnly(cpfText);
-      var rid=(tr.id||'').toLowerCase(), cid=String(tr.getAttribute('data-course-id')||'').toLowerCase(), cbase=String(tr.getAttribute('data-course-base-id')||'').toLowerCase();
+      var rid=(tr.id||'').toLowerCase(),
+          cid=String(tr.getAttribute('data-course-id')||'').toLowerCase(),
+          cbase=String(tr.getAttribute('data-course-base-id')||'').toLowerCase();
+
       var matchText=(q==='')||(nome.indexOf(q)>-1)||(email.indexOf(q)>-1)||(cpfNorm.indexOf(q)>-1)||(qDigits&&cpfDigits.indexOf(qDigits)>-1)||(rid.indexOf(q)>-1)||(cid.indexOf(q)>-1)||(cbase.indexOf(q)>-1);
-      var matchId=(selectedId===''||cid===selectedId||cbase===selectedId);
-      tr.style.display=(matchText&&matchId)?'':'none';
+      var matchCourse=(selectedId===''||cid===selectedId||cbase===selectedId);
+
+      // mês por CRIAÇÃO: caixas fora do mês → 'future' + sem tooltip; no mês → restaurar original
+      var boxes=tr.querySelectorAll('.status-box');
+      var matchesInMonth=0;
+
+      boxes.forEach(function(box){
+        captureOriginalOnce(box);               // guarda status/tooltip/aria originais 1x
+        var ym = getBoxCreationYM(box);
+
+        if(!selectedMonth){
+          // sem filtro: restaurar 100%
+          restoreOriginal(box);
+          return;
+        }
+
+        if(ym && ym === selectedMonth){
+          // pertence ao mês filtrado → status original + tooltip original
+          restoreOriginal(box);
+          matchesInMonth++;
+        }else{
+          // não pertence → future + sem dados visíveis
+          muteAsFuture(box);
+        }
+      });
+
+      var passMonth = (!selectedMonth) ? true : (matchesInMonth > 0);
+      tr.style.display = (matchText && matchCourse && passMonth) ? '' : 'none';
     });
+
     updateSummary();
   }
 
   function clearFilter(){
     var inp=$('dash-search-input'); if(inp){inp.value='';}
     var sel=$('dash-course-filter'); if(sel){sel.value='';}
-    ROWS.forEach(function(tr){ tr.style.display=''; });
+    var mon=$('dash-month-picker'); if(mon){mon.value='';}
+
+    ROWS.forEach(function(tr){
+      tr.style.display='';
+      tr.querySelectorAll('.status-box').forEach(function(b){
+        captureOriginalOnce(b);
+        restoreOriginal(b);
+      });
+    });
+
     updateSummary();
     if(inp){ inp.focus(); }
   }
 
+  // binds
   var btn=$('dash-search-btn'); if(btn){ btn.addEventListener('click',applyFilter); }
   var clr=$('dash-clear-btn'); if(clr){ clr.addEventListener('click', clearFilter); }
+
+  var mon=$('dash-month-picker');
+  if(mon){
+    mon.addEventListener('dash:monthChanged', applyFilter);
+    mon.addEventListener('change', applyFilter);
+    mon.addEventListener('input', applyFilter);
+  }
 
   setRowTooltips();
   updateSummary();
 })();
 </script>
-</div>";
 
-    return $html;
-}
+<script>
+/* Datepicker: limita aos meses realmente existentes nas status-box. Fallback para <input type="month"> */
+(function($){
+  function hasDP(){ return $.datepicker && typeof $.datepicker === 'object'; }
+  function pad2(n){ return (n<10?'0':'')+n; }
+  function ym(y,mIdx){ return y+'-'+pad2(mIdx+1); }       // mIdx 0..11
+  function ymToDate(ym){ var m=String(ym||'').match(/^(\d{4})-(\d{2})$/); return m ? new Date(parseInt(m[1],10), parseInt(m[2],10)-1, 1) : null; }
+
+  function collectAllowedMonths(){
+    var set = new Set();
+    document.querySelectorAll('.status-box[data-month]').forEach(function(box){
+      var v = box.getAttribute('data-month') || '';
+      if(/^\d{4}-\d{2}$/.test(v)) set.add(v);
+    });
+    var arr = Array.from(set);
+    arr.sort(function(a,b){ return a<b ? -1 : (a>b ? 1 : 0); });
+    return arr;
+  }
+
+  function enforceMonthOptions(dpDiv, byYear){
+    var $ySel = dpDiv.find('.ui-datepicker-year');
+    var $mSel = dpDiv.find('.ui-datepicker-month');
+    $ySel.find('option').each(function(){
+      var y = $(this).val();
+      $(this).prop('disabled', !byYear[y]);
+    });
+    var curY = parseInt($ySel.val(),10);
+    if(!byYear[curY]){
+      var years = Object.keys(byYear).map(function(s){return parseInt(s,10);}).sort(function(a,b){return a-b;});
+      if(years.length){ $ySel.val(String(years[0])); curY = years[0]; }
+    }
+    $mSel.find('option').each(function(idx){
+      $(this).prop('disabled', !(byYear[curY] && byYear[curY][idx]));
+    });
+  }
+
+  $(function(){
+    var $inp = $('#dash-month-picker');
+    if(!$inp.length) return;
+
+    var allowed = collectAllowedMonths();
+    if(!allowed.length){
+      // sem meses coletados → mantém input como está
+      return;
+    }
+
+    var byYear = {};
+    allowed.forEach(function(k){
+      var y = k.slice(0,4), mi = parseInt(k.slice(5,7),10)-1;
+      if(!byYear[y]) byYear[y] = {};
+      byYear[y][mi] = true;
+    });
+
+    var allowedSet = new Set(allowed);
+    var minYm = allowed[0], maxYm = allowed[allowed.length-1];
+    var minDate = ymToDate(minYm), maxDate = ymToDate(maxYm);
+
+    var minLabel = minYm.slice(5,7) + '/' + minYm.slice(0,4);
+    var maxLabel = maxYm.slice(5,7) + '/' + maxYm.slice(0,4);
+    if(!$inp.val()){ $inp.attr('placeholder', 'De '+minLabel+' a '+maxLabel); }
+
+    if(!hasDP()){
+      try{
+        $inp.attr('type','month').removeAttr('readonly').attr('min', minYm).attr('max', maxYm);
+        $inp.on('change', function(){
+          var v = $(this).val();
+          if(!allowedSet.has(v)){ $(this).val(''); }
+          this.dispatchEvent(new Event('input'));
+        });
+      }catch(e){}
+      return;
+    }
+
+    $inp.datepicker({
+      dateFormat: 'yy-mm',
+      changeMonth: true,
+      changeYear: true,
+      showButtonPanel: true,
+      minDate: minDate,
+      maxDate: maxDate,
+      beforeShow: function(input, inst){ setTimeout(function(){ enforceMonthOptions(inst.dpDiv, byYear); }, 0); },
+      onChangeMonthYear: function(year, month, inst){ setTimeout(function(){ enforceMonthOptions(inst.dpDiv, byYear); }, 0); },
+      onClose: function(dateText, inst){
+        var dpDiv = inst.dpDiv;
+        var mIdx  = parseInt(dpDiv.find('.ui-datepicker-month :selected').val(),10);
+        var yVal  = parseInt(dpDiv.find('.ui-datepicker-year :selected').val(),10);
+        var key   = ym(yVal, mIdx);
+
+        if(!allowedSet.has(key)){
+          if($(this).val() && !allowedSet.has($(this).val())) $(this).val('');
+          return;
+        }
+        var d = ymToDate(key);
+        if(d < minDate) d = minDate;
+        if(d > maxDate) d = maxDate;
+        $(this).datepicker('setDate', d);
+        $(this).val(key);
+        $(this).trigger('dash:monthChanged', [key]);
+      }
+    });
+  
+    $inp.on('focus', function(){
+      var v = $inp.val();
+      var d = v ? ymToDate(v) : minDate;
+      $inp.datepicker('setDate', d);
+      var inst = $inp.data('datepicker');
+      if(inst){ setTimeout(function(){ enforceMonthOptions(inst.dpDiv, byYear); }, 0); }
+    });
+  });
+})(jQuery);
+</script>
+
+<?php
+$html .= ob_get_clean();
+
+    return $html;}
 add_shortcode('dashboard_assinantes_e_pedidos','mostrar_dashboard_assinantes');
