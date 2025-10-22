@@ -2,7 +2,7 @@
 /*
 Plugin Name: Meu Plugin Dashboard Assinantes
 Description: Exibe assinaturas Asaas agrupadas por status (Em Dia, Em Atraso e Canceladas) via shortcode [dashboard_assinantes_e_pedidos]
-Version: 1.18
+Version: 1.19
 Author: Luis Furtado
 */
 
@@ -40,6 +40,7 @@ function dash_fetch_all_asaas_subscriptions() {
     $payments_table = $wpdb->prefix . 'processa_pagamentos_asaas';
     $users_table    = $wpdb->users;
 
+    // E-mails a ignorar
     $IGNORED_EMAILS = array_map('strtolower', [
         'mwry5467@gmail.com',
         'financeiro4@colab-on.com.br',
@@ -85,7 +86,7 @@ function dash_fetch_all_asaas_subscriptions() {
     $rows = array_values(array_filter($rows, function($r) use ($IGNORED_EMAILS) {
         $email = strtolower(trim($r['customer_email'] ?? ''));
         if ($email === '') {
-            // Sem e-mail resolvido: mantém (não é um dos testes explicitamente)
+            // Sem e-mail resolvido: mantém
             return true;
         }
         return !in_array($email, $IGNORED_EMAILS, true);
@@ -93,7 +94,6 @@ function dash_fetch_all_asaas_subscriptions() {
 
     return $rows;
 }
-
 
 /**
  * Mapeia product_id para várias assinaturas de uma só vez para reduzir roundtrips.
@@ -107,7 +107,7 @@ function dash_get_product_map_for_subscriptions(array $subscription_ids) {
 
     $items_table = $wpdb->prefix . 'processa_pagamentos_asaas_subscriptions_items';
 
-    // CHUNKING para listas grandes em IN (...) evitando limites do MySQL/placeholder
+    // CHUNKING para listas grandes
     $chunkSize = 1000;
     $chunks = array_chunk($subscription_ids, $chunkSize);
     foreach ($chunks as $chunk) {
@@ -124,7 +124,7 @@ function dash_get_product_map_for_subscriptions(array $subscription_ids) {
 /**
  * Busca pagamentos para várias assinaturas de uma vez.
  * Retorna [ subscriptionID(string) => [ rows... ] ],
- * ignorando itens neutros (REFUNDED/CANCELLED/DELETED/CHARGEBACK) – agora já no SQL.
+ * ignorando itens neutros (REFUNDED/CANCELLED/DELETED/CHARGEBACK).
  */
 function dash_fetch_payments_map(array $subscriptionIDs) {
     global $wpdb;
@@ -139,7 +139,6 @@ function dash_fetch_payments_map(array $subscriptionIDs) {
     $chunks = array_chunk($subscriptionIDs, $chunkSize);
     foreach ($chunks as $chunk) {
         $ph  = implode(',', array_fill(0, count($chunk), '%s'));
-        // Filtramos neutros no SQL para reduzir carga no PHP/memória (mantém a mesma lógica existente)
         $sql = $wpdb->prepare(
             "SELECT *
              FROM {$payments_table}
@@ -284,7 +283,7 @@ function mostrar_dashboard_assinantes($atts = []) {
     $pid_map = dash_get_product_map_for_subscriptions($subscription_table_ids);
     $pay_map = dash_fetch_payments_map(array_filter($subscriptionIDs));
 
-    // Lista única de IDs de cursos para o <select> (com cache local de nomes → menos chamadas a wc_get_product)
+    // Lista única de IDs de cursos para o <select>
     $course_ids_set = [];
     if (!empty($pid_map)) {
         foreach ($pid_map as $__sub_table_id => $__pid) { $__pid = (int)$__pid; if ($__pid > 0) { $course_ids_set[$__pid] = true; } }
@@ -324,7 +323,6 @@ function mostrar_dashboard_assinantes($atts = []) {
 
         $stat_raw = strtoupper(trim($sub['status'] ?? ''));
         $payments = array_values($pay_map[$subscriptionID] ?? []);
-        // Se a assinatura só tinha itens "neutros", após filtro SQL pode ficar vazia → oculta, como já era
         if ((isset($pay_map[$subscriptionID]) && empty($payments))) continue;
 
         if (in_array($stat_raw,$expiredStatuses,true)) {
@@ -416,6 +414,10 @@ $css = '<style>
 .dash-comp-label{font-size:.8rem;color:var(--dash-muted);margin-top:4px;}
 .dash-select{flex:0 0 180px;max-width:220px;}
 .dash-select.dash-input{padding-right:28px;}
+/* Banner do modo histórico */
+.dash-hist-banner{margin:6px 0 10px;padding:8px 12px;border:1px dashed #6b7280;border-radius:8px;background:#fffbea;color:#374151;font-size:.92rem}
+.dash-hist-row{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 8px;}
+.dash-hist-row .dash-input{ flex:0 0 190px; max-width:220px; } 
 </style>';
 
 $css_extra = '<style>
@@ -430,26 +432,45 @@ $css_extra = '<style>
 
 $css .= $css_extra;
 
-
-    // ===== RESUMO (compacto) =====
+    // ===== RESUMO =====
     $summary = '<div class="dash-summary" role="region" aria-label="Resumo das assinaturas"><div class="dash-kpi total" role="status" aria-live="polite"><div class="dash-kpi-label">Assinaturas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span><small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div></div><div class="dash-kpi emdia" role="status" aria-live="polite"><div class="dash-kpi-label">Em Dia</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span><small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div></div><div class="dash-kpi atraso" role="status" aria-live="polite"><div class="dash-kpi-label">Em Atraso</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span><small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div></div><div class="dash-kpi cancel" role="status" aria-live="polite"><div class="dash-kpi-label">Canceladas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span><small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div></div></div><div class="dash-composition" aria-label="Composição por status (visível)"><div class="dash-stacked"><span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span><span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span><span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span></div><div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div></div><div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
 
-    // ===== Busca (compacto) =====
-    $search = '<div class="dash-wrap">'.$summary.'<div class="dash-search" role="search" aria-label="Filtrar assinantes"><select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'.$course_options.'</select> 
-    <input type="text" id="dash-month-picker"
-       class="dash-input dash-select"
-       placeholder="Selecionar mês/ano"
-       aria-label="Selecionar mês e ano"
-       readonly> 
-       <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF"><button type="button" id="dash-search-btn" class="dash-btn">Buscar</button><button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button></div>';
+    // ===== Barra de busca + Histórico =====
+    $search = '<div class="dash-wrap">'.$summary.'
+    <!-- 1ª linha: filtros normais -->
+    <div class="dash-search" role="search" aria-label="Filtrar assinantes">
+      <select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'.$course_options.'</select>
+      <input type="text" id="dash-month-picker" class="dash-input dash-select" placeholder="Selecionar mês/ano" aria-label="Selecionar mês e ano" readonly>
+      <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
+      <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
+      <button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button>
+    </div>
 
-    // ===== Legenda (compacto) =====
-    $legend = '<div style="display:flex;gap:14px;align-items:center;margin:4px 0 10px;flex-wrap:wrap;font-size:.9rem;color:#374151"><span><span class="status-box paid" tabindex="0" aria-label="Pago"></span> Pago</span><span><span class="status-box overdue" tabindex="0" aria-label="Em atraso"></span> Em atraso</span><span><span class="status-box pending" tabindex="0" aria-label="Pendente"></span> Pendente</span><span><span class="status-box future" tabindex="0" aria-label="Não criada"></span> Não criada</span></div>';
+    <!-- 2ª linha: controles do modo histórico -->
+    <div class="dash-hist-row" role="group" aria-label="Histórico">
+      <input type="date" id="dash-snapshot-date" class="dash-input dash-select" aria-label="Data de referência (histórico)" placeholder="AAAA-MM-DD">
+      <button type="button" id="dash-snapshot-apply" class="dash-btn" aria-label="Aplicar histórico">Histórico</button>
+      <button type="button" id="dash-snapshot-clear" class="dash-btn" aria-label="Sair do histórico">Sair do histórico</button>
+    </div>
 
-    // Inicia o HTML só AGORA
-  $html  = $css . $search . $legend;
+    <!-- Banner do histórico -->
+    <div id="dash-hist-banner" class="dash-hist-banner" style="display:none" role="status" aria-live="polite">
+      Modo histórico ativo em <strong id="dash-hist-date-label"></strong>. Os filtros normais ficam temporariamente ignorados.
+      </div>';
 
-    // ===== Tabela builder (sem mudar lógica) =====
+
+    // ===== Legenda =====
+    $legend = '<div style="display:flex;gap:14px;align-items:center;margin:4px 0 10px;flex-wrap:wrap;font-size:.9rem;color:#374151">
+      <span><span class="status-box paid" tabindex="0" aria-label="Pago"></span> Pago</span>
+      <span><span class="status-box overdue" tabindex="0" aria-label="Em atraso"></span> Em atraso</span>
+      <span><span class="status-box pending" tabindex="0" aria-label="Pendente"></span> Pendente</span>
+      <span><span class="status-box future" tabindex="0" aria-label="Não criada"></span> Não criada</span>
+    </div>';
+
+    // Inicia HTML
+    $html  = $css . $search . $legend;
+
+    // ===== Tabela builder =====
     $build_row = function(array $sub, array $payments, int $product_id) use ($agora, $hojeYmd) {
         $subscription_pk_id = (int)($sub['id'] ?? 0);
         $base_id = dash_maybe_get_parent_product_id($product_id);
@@ -480,58 +501,75 @@ $css .= $css_extra;
         $r .= '<td>'.esc_html($cpf_display).'</td>';
 
         $r .= '<td>';
+
 foreach ($installments as $p) {
-    // Inicializações seguras para o caso de $p === null
-    $creAt = '';
-    $venc_ts = 0;
-    $pagto_raw = '';
+    // defaults
     $cls = 'future';
     $status_tip = 'Não criada';
     $tooltip = 'Parcela não criada';
-    $pag = '—';
-    $criacao_br = '';
-    $criacao_dmy = '';
-    $vencimento_br = '';
-    $pagamento_br = '';
-    $monthKey = '';
-    $dueYmd = '';
+
+    // datas/labels
+    $cre_raw = '';     $created_ymd = '';
+    $due_ts  = 0;      $due_ymd     = '';
+    $pay_raw = '';     $paid_ymd    = '';
+    $venc_label = '—'; $pag_label   = '—'; $created_label = '—';
 
     if ($p) {
-        $val = isset($p['value']) ? number_format((float)$p['value'],2,',','.') : '0,00';
-        $creAt = $p['created'] ?? ($p['createdAt'] ?? '');
-        $created = $creAt ? date_i18n('d/m/Y - H:i', strtotime($creAt)) : '—';
-        $p_stat = strtoupper($p['paymentStatus'] ?? '');
+        $val = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : '0,00';
+
+        // criação
+        $cre_raw = $p['created'] ?? ($p['createdAt'] ?? '');
+        if ($cre_raw) {
+            $created_ymd  = date_i18n('Y-m-d', strtotime($cre_raw));
+            $created_label = date_i18n('d/m/Y - H:i', strtotime($cre_raw));
+        }
+
+        // vencimento
         $due_ts  = strtotime($p['dueDate'] ?? '');
         $orig_ts = strtotime($p['originalDueDate'] ?? '');
-        $venc_ts = $due_ts ?: $orig_ts;
-        $venc = $venc_ts ? date_i18n('d/m/Y',$venc_ts) : '—';
-        $dueYmd = $venc_ts ? date_i18n('Y-m-d',$venc_ts) : null;
-        $isPaid = in_array($p_stat,['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'],true);
-        $isOverdue = (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd)));
-        if ($isPaid) { $cls='paid'; $pag=date_i18n('d/m/Y', strtotime($p['paymentDate'] ?? '')); $status_tip='Pago'; }
-        elseif ($isOverdue) { $cls='overdue'; $pag='ATRASADA'; $status_tip='Em atraso'; }
-        else { $cls='pending'; $status_tip='Pendente'; }
-        $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created}\nVencimento: {$venc}\nPagamento: {$pag}";
-    }
+        $due_ts  = $due_ts ?: $orig_ts;
+        if ($due_ts) {
+            $due_ymd    = date_i18n('Y-m-d', $due_ts);
+            $venc_label = date_i18n('d/m/Y', $due_ts);
+        }
 
-    // Datas pt-BR para atributos data-* (não quebram se $p for null)
-    $criacao_br    = !empty($creAt)   ? date_i18n('d/m/Y - H:i', strtotime($creAt)) : '';
-    $criacao_dmy   = !empty($creAt)   ? date_i18n('d/m/Y',       strtotime($creAt)) : '';
-    $vencimento_br = !empty($venc_ts) ? date_i18n('d/m/Y',       $venc_ts)          : '';
-    $pagamento_br  = !empty($pagto_raw) ? date_i18n('d/m/Y',     strtotime($pagto_raw)) : '';
-    $monthKey      = !empty($venc_ts) ? date_i18n('Y-m',         $venc_ts)          : '';
-    $dueYmd        = !empty($venc_ts) ? date_i18n('Y-m-d',       $venc_ts)          : '';
+        // pagamento
+        $pay_raw = $p['paymentDate'] ?? '';
+        if ($pay_raw) {
+            $paid_ymd  = date_i18n('Y-m-d', strtotime($pay_raw));
+            $pag_label = date_i18n('d/m/Y', strtotime($pay_raw));
+        }
+
+        // status "atual" (visão normal)
+        $p_stat   = strtoupper($p['paymentStatus'] ?? '');
+        $isPaid   = in_array($p_stat, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
+        $hojeYmd  = date_i18n('Y-m-d', current_time('timestamp'));
+        $isOver   = (!$isPaid && ($p_stat === 'OVERDUE' || ($due_ymd && $due_ymd < $hojeYmd)));
+
+        if ($isPaid)       { $cls='paid';    $status_tip='Pago'; }
+        elseif ($isOver)   { $cls='overdue'; $status_tip='Em atraso'; }
+        else               { $cls='pending'; $status_tip='Pendente'; }
+
+        $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created_label}\nVencimento: {$venc_label}\nPagamento: {$pag_label}";
+    }
 
     $r .= '<span class="status-box '.esc_attr($cls).'"'
         .' data-tooltip="'.esc_attr($tooltip).'"'
         .' tabindex="0" aria-label="'.esc_attr($status_tip).'"'
-        .' data-de-criacao="'.esc_attr($criacao_br).'"'
-        .' data-de-vencimento="'.esc_attr($vencimento_br).'"'
-        .' data-de-pagamento="'.esc_attr($pagamento_br).'"'
-        .' data-month="'.esc_attr($monthKey).'"'
-        .' data-date="'.esc_attr($dueYmd).'"'
+        // antigos (pt-BR, ainda usados pelo filtro mensal e tooltips)
+        .' data-de-criacao="'.esc_attr($created_label !== '—' ? $created_label : '').'"'
+        .' data-de-vencimento="'.esc_attr($due_ts ? date_i18n('d/m/Y', $due_ts) : '').'"'
+        .' data-de-pagamento="'.esc_attr($pay_raw ? date_i18n('d/m/Y', strtotime($pay_raw)) : '').'"'
+        .' data-month="'.esc_attr($due_ts ? date_i18n('Y-m', $due_ts) : '').'"'
+        .' data-date="'.esc_attr($due_ymd).'"'     /* <<< AQUI sem a barra invertida */
+        // NOVOS (ISO) — usados pelo histórico
+        .' data-created-ymd="'.esc_attr($created_ymd).'"'
+        .' data-due-ymd="'.esc_attr($due_ymd).'"'
+        .' data-paid-ymd="'.esc_attr($paid_ymd).'"'
         .'></span>';
+
 }
+
         $r .= '</td>';
 
         $stat = strtoupper(trim($sub['status'] ?? ''));
@@ -559,39 +597,46 @@ foreach ($installments as $p) {
         $html .= '</tbody></table>';
     }
 
-    // ===== JS (otimizado de forma conservadora; sem alterar UX/resultado) =====
-
+    // ===== JS =====
 ob_start();
 ?>
 <script>
 (function(){
+  function $id(id){ return document.getElementById(id); }
+  function onReady(fn){
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', fn, { once:true });
+    } else {
+      fn();
+    }
+  }
+
   // Utils
-  var $ = function(id){ return document.getElementById(id); };
   function normalize(s){ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
   function digitsOnly(s){ return String(s||'').replace(/\D+/g,''); }
 
-  // ====== mês selecionado (YYYY-MM) ======
   function getSelectedMonth(){
-    var el = $('dash-month-picker');
+    var el = $id('dash-month-picker');
     return el ? String(el.value||'').trim() : '';
   }
 
-  // 'dd/mm/yyyy' ou 'dd/mm/yyyy - HH:ii' -> 'YYYY-MM'
-  function brDateToYm(s){
-    if(!s) return '';
-    var m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if(!m) return '';
-    var mm = ('0'+parseInt(m[2],10)).slice(-2);
-    return String(m[3])+'-'+mm;
-  }
-
-  // ====== mês da BOX por CRIAÇÃO (exclusivo) ======
+  // ====== MÊS por CRIAÇÃO (prioriza data-de-criacao) ======
   function getBoxCreationYM(box){
-    var createdBR = box.getAttribute('data-de-criacao') || '';
-    return brDateToYm(createdBR); // se não tiver criação válida, retorna ''
+    var br = box.getAttribute('data-de-criacao') || '';
+    if (br) {
+      var m = String(br).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (m) {
+        var mm = ('0' + parseInt(m[2], 10)).slice(-2);
+        return m[3] + '-' + mm;
+      }
+    }
+    var iso = box.getAttribute('data-created-ymd') || '';
+    var mi = iso.match(/^(\d{4})-(\d{2})-\d{2}$/);
+    if (mi) return mi[1] + '-' + mi[2];
+    return '';
   }
 
-  // ====== cache e restauração de estado original ======
+  // cache/restauração visual
   function captureOriginalOnce(box){
     if(box.dataset && box.dataset._captured==='1') return;
     var origStatus = 'future';
@@ -605,6 +650,10 @@ ob_start();
     box.dataset.origAria    = box.getAttribute('aria-label') || '';
     box.dataset._captured   = '1';
   }
+  function setStatus(box, status){
+    box.classList.remove('paid','overdue','pending','future');
+    box.classList.add(status);
+  }
   function restoreOriginal(box){
     var s = (box.dataset && box.dataset.origStatus) ? box.dataset.origStatus : 'future';
     setStatus(box, s);
@@ -617,32 +666,23 @@ ob_start();
     box.removeAttribute('title');
     box.classList.remove('muted-future');
   }
-
-  function setStatus(box, status){
-    box.classList.remove('paid','overdue','pending','future');
-    box.classList.add(status);
-  }
-
-  // ====== “Mutar” box fora do mês: future + sem dados visíveis ======
   function muteAsFuture(box){
     setStatus(box, 'future');
-    // zera tooltip/aria (sem perder os originais, que estão no dataset)
     box.setAttribute('data-tooltip','');
     box.setAttribute('aria-label','Sem dados');
     box.removeAttribute('title');
     box.classList.add('muted-future');
   }
 
-  // ====== KPIs ======
+  // KPIs
   function countVisibleRows(tableId){
-    var t=$(tableId); if(!t) return 0;
+    var t=$id(tableId); if(!t) return 0;
     var rows=t.querySelectorAll('tbody tr[id^="sub-"]');
-    var n=0;
-    rows.forEach(function(r){ if(r.style.display!=='none') n++; });
+    var n=0; rows.forEach(function(r){ if(r.style.display!=='none') n++; });
     return n;
   }
-  function setText(id,txt){var el=$(id); if(el){el.textContent=txt;}}
-  function setBar(id,pct){var el=$(id); if(el){el.style.width=Math.max(0,Math.min(100,pct))+'%';}}
+  function setText(id,txt){var el=$id(id); if(el){el.textContent=txt;}}
+  function setBar(id,pct){var el=$id(id); if(el){el.style.width=Math.max(0,Math.min(100,pct))+'%';}}
   function pct(part,total){return total?Math.round((part/total)*100):0;}
   function updateSummary(){
     var visDia=countVisibleRows('dash-table-em_dia');
@@ -669,38 +709,40 @@ ob_start();
   }
   window.updateSummary = updateSummary;
 
-  // ====== map p/ tooltip de linha ======
-  var courseMap=(function(){
-    var s=$('dash-course-filter'), map={};
+  function buildCourseMap(){
+    var s=$id('dash-course-filter'), map={};
     if(s){ for(var i=0;i<s.options.length;i++){ var opt=s.options[i]; map[String(opt.value||'')]=opt.textContent||opt.innerText||opt.text||''; } }
     return map;
-  })();
-  function getCourseNameById(val){ return courseMap[String(val||'')]||''; }
-
-  function setRowTooltips(){
+  }
+  function setRowTooltips(courseMap){
     var rows=document.querySelectorAll('.dash-table tbody tr[id^="sub-"]');
     rows.forEach(function(tr){
       var cid=String(tr.getAttribute('data-course-id')||'');
       var cbase=String(tr.getAttribute('data-course-base-id')||'');
-      var name=getCourseNameById(cid)||getCourseNameById(cbase);
+      var name=(courseMap[String(cid)]||'')||(courseMap[String(cbase)]||'');
       if(name){ tr.setAttribute('data-tooltip','Curso: '+name); tr.removeAttribute('title'); }
       else{ tr.removeAttribute('data-tooltip'); tr.removeAttribute('title'); }
     });
   }
 
-  // ====== snapshot das linhas ======
-  var ROWS=[].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
+  var ROWS = [];
 
-  // ====== FILTRO: texto/curso + MÊS (por CRIAÇÃO) ======
+  // ====== FILTRO principal (mês por CRIAÇÃO) ======
   function applyFilter(){
-    var inp=$('dash-search-input'), sel=$('dash-course-filter');
+    ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
+
+    var inp=$id('dash-search-input'), sel=$id('dash-course-filter');
     var rawQ=inp?inp.value.trim():'';
     var q=normalize(rawQ), qDigits=digitsOnly(rawQ);
     var selectedId=sel?String(sel.value||'').toLowerCase():'';
     var selectedMonth=getSelectedMonth(); // '' ou 'YYYY-MM'
+    var inHist = !!window.__dashHistActive;
 
     ROWS.forEach(function(tr){
       var c=tr.cells; if(!c||c.length<3){ tr.style.display=''; return; }
+
+      // === NOVO: respeita ocultação do histórico por linha ===
+      var histHide = tr.classList.contains('hist-hide-row');
 
       // texto/curso
       var nome=normalize(c[0].textContent), email=normalize(c[1].textContent);
@@ -712,69 +754,208 @@ ob_start();
       var matchText=(q==='')||(nome.indexOf(q)>-1)||(email.indexOf(q)>-1)||(cpfNorm.indexOf(q)>-1)||(qDigits&&cpfDigits.indexOf(qDigits)>-1)||(rid.indexOf(q)>-1)||(cid.indexOf(q)>-1)||(cbase.indexOf(q)>-1);
       var matchCourse=(selectedId===''||cid===selectedId||cbase===selectedId);
 
-      // mês por CRIAÇÃO: caixas fora do mês → 'future' + sem tooltip; no mês → restaurar original
+      // mês por CRIAÇÃO (comportamento distinto no histórico)
       var boxes=tr.querySelectorAll('.status-box');
       var matchesInMonth=0;
 
       boxes.forEach(function(box){
-        captureOriginalOnce(box);               // guarda status/tooltip/aria originais 1x
-        var ym = getBoxCreationYM(box);
+        captureOriginalOnce(box);
+        box.classList.remove('month-dim-hide');
 
         if(!selectedMonth){
-          // sem filtro: restaurar 100%
-          restoreOriginal(box);
+          if(!inHist){ restoreOriginal(box); }
           return;
         }
 
-        if(ym && ym === selectedMonth){
-          // pertence ao mês filtrado → status original + tooltip original
-          restoreOriginal(box);
-          matchesInMonth++;
-        }else{
-          // não pertence → future + sem dados visíveis
-          muteAsFuture(box);
+        var ym = (function(b){
+          var br = b.getAttribute('data-de-criacao') || '';
+          if (br) {
+            var m = String(br).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+            if (m) return m[3] + '-' + ('0'+parseInt(m[2],10)).slice(-2);
+          }
+          var iso = b.getAttribute('data-created-ymd') || '';
+          var mi = iso.match(/^(\d{4})-(\d{2})-\d{2}$/);
+          return mi ? (mi[1] + '-' + mi[2]) : '';
+        })(box);
+
+        var isMatch = (ym && ym === selectedMonth);
+
+        if (inHist) {
+          if (isMatch) { matchesInMonth++; }
+          else { box.classList.add('month-dim-hide'); }
+        } else {
+          if (isMatch) { restoreOriginal(box); matchesInMonth++; }
+          else { muteAsFuture(box); }
         }
       });
 
       var passMonth = (!selectedMonth) ? true : (matchesInMonth > 0);
-      tr.style.display = (matchText && matchCourse && passMonth) ? '' : 'none';
+      tr.style.display = (matchText && matchCourse && passMonth && !histHide) ? '' : 'none';
     });
 
-    updateSummary();
+    if (window.dashRegroupRows) { window.dashRegroupRows(); } else { if (window.updateSummary) { window.updateSummary(); } }
   }
 
   function clearFilter(){
-    var inp=$('dash-search-input'); if(inp){inp.value='';}
-    var sel=$('dash-course-filter'); if(sel){sel.value='';}
-    var mon=$('dash-month-picker'); if(mon){mon.value='';}
+  var inp=$id('dash-search-input'); if(inp){inp.value='';}
+  var sel=$id('dash-course-filter'); if(sel){sel.value='';}
 
-    ROWS.forEach(function(tr){
-      tr.style.display='';
-      tr.querySelectorAll('.status-box').forEach(function(b){
-        captureOriginalOnce(b);
-        restoreOriginal(b);
-      });
+  var mon=$id('dash-month-picker');
+  if(mon){
+    // 1) zera o valor do input
+    mon.value = '';
+
+    // 2) se estiver usando jQuery UI Datepicker, zera a “data selecionada” interna
+    if (typeof jQuery !== 'undefined') {
+      var $mon = jQuery('#dash-month-picker');
+      if ($mon.length && $mon.data('datepicker')) {
+        $mon.datepicker('setDate', null); // limpa seleção interna
+        $mon.val('');                     // garante que o input fique vazio
+      }
+    }
+
+    // 3) dispara os mesmos eventos que o applyFilter() já escuta
+    //    (assim o filtro de mês sai 100% do estado)
+    mon.dispatchEvent(new Event('dash:monthChanged'));
+    mon.dispatchEvent(new Event('change'));
+    mon.dispatchEvent(new Event('input'));
+  }
+
+  // limpa efeitos visuais e exibe todas as linhas
+  ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
+  ROWS.forEach(function(tr){
+    tr.classList.remove('hist-hide-row');
+    tr.style.display='';
+    tr.querySelectorAll('.status-box').forEach(function(b){
+      captureOriginalOnce(b);
+      b.classList.remove('month-dim-hide');
+      restoreOriginal(b);
+    });
+  });
+
+  // se houver reagrupamento dinâmico, mantenha coerente
+  if (window.dashRegroupRows) { window.dashRegroupRows(); }
+
+  updateSummary();
+  if(inp){ inp.focus(); }
+}
+
+
+  window.dashApplyFilter = applyFilter;
+
+  function init(){
+    document.addEventListener('click', function(ev){
+      var t = ev.target;
+      if (!t) return;
+      if (t.id === 'dash-search-btn') {
+        ev.preventDefault();
+        applyFilter();
+      } else if (t.id === 'dash-clear-btn') {
+        ev.preventDefault();
+        clearFilter();
+      }
     });
 
+    var mon=$id('dash-month-picker');
+    if(mon){
+      mon.addEventListener('dash:monthChanged', applyFilter);
+      mon.addEventListener('change', applyFilter);
+      mon.addEventListener('input', applyFilter);
+    }
+
+    setRowTooltips(buildCourseMap());
+    ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
     updateSummary();
-    if(inp){ inp.focus(); }
   }
+  window.dashClearFilter = clearFilter; 
 
-  // binds
-  var btn=$('dash-search-btn'); if(btn){ btn.addEventListener('click',applyFilter); }
-  var clr=$('dash-clear-btn'); if(clr){ clr.addEventListener('click', clearFilter); }
-
-  var mon=$('dash-month-picker');
-  if(mon){
-    mon.addEventListener('dash:monthChanged', applyFilter);
-    mon.addEventListener('change', applyFilter);
-    mon.addEventListener('input', applyFilter);
-  }
-
-  setRowTooltips();
-  updateSummary();
+  onReady(init);
 })();
 </script>
+
+<script>
+/* Reagrupamento dinâmico de linhas (depois de mês/histórico) */
+(function(){
+  function $id(id){ return document.getElementById(id); }
+
+  function _closestTableId(tr){
+    var t = tr ? tr.closest('table') : null;
+    return t ? (t.id || '') : '';
+  }
+
+  function _rowIsCancelled(tr){
+    var tds = tr ? tr.getElementsByTagName('td') : null;
+    if(!tds || tds.length < 5) return false;
+    var txt = (tds[4].textContent || '').toLowerCase();
+    if(txt.indexOf('cancelado') > -1) return true;
+    if(txt.indexOf('cancelada') > -1) return true;
+    return false;
+  }
+
+  // retorna true/false se há overdue visível; null = ignorar (linha oculta ou nenhuma box visível)
+  function _rowHasVisibleOverdue(tr){
+    if(!tr || tr.style.display === 'none') return null;
+
+    var boxes = tr.querySelectorAll('.status-box');
+    var anyVisible = false;
+    var i = 0;
+    for(i=0;i<boxes.length;i++){
+      var b = boxes[i];
+      if(b.classList.contains('month-dim-hide')) { continue; } // escondida pelo mês
+      anyVisible = true;
+      if(b.classList.contains('overdue')) { return true; }
+    }
+    if(!anyVisible) return null; // nada visível por causa do mês/histórico
+    return false;
+  }
+
+  function dashRegroupRows(){
+    var tbDia = $id('dash-table-em_dia');
+    var tbAtr = $id('dash-table-em_atraso');
+    var tbCan = $id('dash-table-canceladas');
+
+    var tbodyDia = tbDia ? tbDia.querySelector('tbody') : null;
+    var tbodyAtr = tbAtr ? tbAtr.querySelector('tbody') : null;
+    var tbodyCan = tbCan ? tbCan.querySelector('tbody') : null;
+
+    var rows = document.querySelectorAll('.dash-table tbody tr[id^="sub-"]');
+    rows.forEach(function(tr){
+      if(tr.style.display === 'none') return; // já ocultada por busca/curso/histórico
+
+      // 1) Canceladas sempre vencem
+      if(_rowIsCancelled(tr)){
+        if(tbodyCan){
+          var cur = _closestTableId(tr);
+          if(cur !== 'dash-table-canceladas'){ tbodyCan.appendChild(tr); }
+        }
+        return;
+      }
+
+      // 2) Se tem overdue visível => em_atraso; senão => em_dia
+      var ov = _rowHasVisibleOverdue(tr);
+      if(ov === null) return; // nenhuma parcela visível, não mexe
+
+      if(ov){
+        if(tbodyAtr){
+          var curA = _closestTableId(tr);
+          if(curA !== 'dash-table-em_atraso'){ tbodyAtr.appendChild(tr); }
+        }
+      }else{
+        if(tbodyDia){
+          var curD = _closestTableId(tr);
+          if(curD !== 'dash-table-em_dia'){ tbodyDia.appendChild(tr); }
+        }
+      }
+    });
+
+    if(window.updateSummary){ window.updateSummary(); }
+  }
+
+  // exporta p/ outros blocos
+  window.dashRegroupRows = dashRegroupRows;
+})();
+</script>
+
 
 <script>
 /* Datepicker: limita aos meses realmente existentes nas status-box. Fallback para <input type="month"> */
@@ -784,17 +965,33 @@ ob_start();
   function ym(y,mIdx){ return y+'-'+pad2(mIdx+1); }       // mIdx 0..11
   function ymToDate(ym){ var m=String(ym||'').match(/^(\d{4})-(\d{2})$/); return m ? new Date(parseInt(m[1],10), parseInt(m[2],10)-1, 1) : null; }
 
-  function collectAllowedMonths(){
-    var set = new Set();
-    document.querySelectorAll('.status-box[data-month]').forEach(function(box){
-      var v = box.getAttribute('data-month') || '';
-      if(/^\d{4}-\d{2}$/.test(v)) set.add(v);
-    });
-    var arr = Array.from(set);
-    arr.sort(function(a,b){ return a<b ? -1 : (a>b ? 1 : 0); });
-    return arr;
-  }
+  // >>>> COLETA MESES POR CRIAÇÃO (prioriza data-de-criacao) <<<<
+function collectAllowedMonthsByCreation(){
+  function pad2(n){ return (n<10?'0':'')+n; }
+  var set = new Set();
 
+  document.querySelectorAll('.status-box').forEach(function(box){
+    // 1) BR primeiro
+    var br = box.getAttribute('data-de-criacao') || '';
+    if (br) {
+      var mb = String(br).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (mb) {
+        set.add(mb[3] + '-' + pad2(parseInt(mb[2],10)));
+        return;
+      }
+    }
+    // 2) Fallback ISO
+    var iso = box.getAttribute('data-created-ymd') || '';
+    var mi = String(iso).match(/^(\d{4})-(\d{2})-\d{2}$/);
+    if (mi) {
+      set.add(mi[1] + '-' + mi[2]);
+    }
+  });
+
+  var arr = Array.from(set);
+  arr.sort(function(a,b){ return a<b ? -1 : (a>b ? 1 : 0); });
+  return arr;
+}
   function enforceMonthOptions(dpDiv, byYear){
     var $ySel = dpDiv.find('.ui-datepicker-year');
     var $mSel = dpDiv.find('.ui-datepicker-month');
@@ -816,9 +1013,8 @@ ob_start();
     var $inp = $('#dash-month-picker');
     if(!$inp.length) return;
 
-    var allowed = collectAllowedMonths();
+    var allowed = collectAllowedMonthsByCreation();
     if(!allowed.length){
-      // sem meses coletados → mantém input como está
       return;
     }
 
@@ -876,7 +1072,7 @@ ob_start();
         $(this).trigger('dash:monthChanged', [key]);
       }
     });
-  
+
     $inp.on('focus', function(){
       var v = $inp.val();
       var d = v ? ymToDate(v) : minDate;
@@ -888,8 +1084,363 @@ ob_start();
 })(jQuery);
 </script>
 
+<script>
+/* Histórico (criação + vencimento + pagamento), sem botões — com atualização interna */
+(function(){
+  function $id(id){ return document.getElementById(id); }
+
+  // ===== helpers visuais =====
+  function setStatus(box, status){
+    box.classList.remove('paid','overdue','pending','future');
+    box.classList.add(status);
+  }
+  function captureOriginalOnce(box){
+    if (box.dataset && box.dataset._histcap==='1') return;
+    var orig = box.classList.contains('paid')    ? 'paid'
+             : box.classList.contains('overdue') ? 'overdue'
+             : box.classList.contains('pending') ? 'pending'
+             : 'future';
+    box.dataset._histcap   = '1';
+    box.dataset._origClass = orig;
+    box.dataset._origTip   = box.getAttribute('data-tooltip') || '';
+    box.dataset._origAria  = box.getAttribute('aria-label')   || '';
+  }
+  function restoreOriginal(box){
+    var c = box.dataset._origClass || 'future';
+    setStatus(box, c);
+    if (box.dataset._origTip){ box.setAttribute('data-tooltip', box.dataset._origTip); } else { box.removeAttribute('data-tooltip'); }
+    if (box.dataset._origAria){ box.setAttribute('aria-label', box.dataset._origAria); } else { box.removeAttribute('aria-label'); }
+    box.removeAttribute('title');
+    box.classList.remove('month-dim-hide');
+  }
+
+  // ===== helpers de datas =====
+  function toISO(brOrIso){
+    var s = String(brOrIso||'').trim();
+    // dd/mm/aaaa
+    var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m){
+      var dd=('0'+parseInt(m[1],10)).slice(-2), mm=('0'+parseInt(m[2],10)).slice(-2);
+      return m[3]+'-'+mm+'-'+dd;
+    }
+    // aaaa-mm-dd
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // aaaammdd
+    var n = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (n) return n[1]+'-'+n[2]+'-'+n[3];
+    return '';
+  }
+  function ymdToInt(iso){ // aaaa-mm-dd -> aaaaMMdd int
+    iso = toISO(iso);
+    return iso ? parseInt(iso.replace(/-/g,''),10) : null;
+  }
+  function isoToBr(iso){
+    iso = toISO(iso);
+    var m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? (m[3]+'/'+m[2]+'/'+m[1]) : '—';
+  }
+
+  function getCreatedYmd(box){
+    return toISO( (box.getAttribute('data-created-ymd')||box.getAttribute('data-de-criacao')||'') );
+  }
+  function getDueYmd(box){
+    return toISO( (box.getAttribute('data-due-ymd')||box.getAttribute('data-de-vencimento')||'') );
+  }
+  function getPaidYmd(box){
+    return toISO( (box.getAttribute('data-paid-ymd')||box.getAttribute('data-de-pagamento')||'') );
+  }
+
+  // ===== regra de status histórico =====
+function resolveHistoricalStatus(box, refInt){
+  var createdI = ymdToInt(getCreatedYmd(box));
+  var dueI     = ymdToInt(getDueYmd(box));
+  var paidI    = ymdToInt(getPaidYmd(box));
+
+  // 1) não criada
+  if (!createdI || createdI > refInt) {
+    return { status: 'future', statusLabel: 'Não criada' };
+  }
+
+  // 2) paga (pagamento <= ref)
+  if (paidI) {
+    if (refInt >= paidI) {
+      return { status: 'paid', statusLabel: 'Pago' };
+    }
+  }
+
+  // 3) vencida e não paga (vencimento <= ref)
+  if (dueI) {
+    if (refInt >= dueI) {
+      return { status: 'overdue', statusLabel: 'Em atraso' };
+    }
+  }
+
+  // 4) criada, antes do vencimento e sem pagamento
+  return { status: 'pending', statusLabel: 'Pendente' };
+}
+
+
+  // monta tooltip preservando os dados originais
+  function buildTooltip(box, statusLabel, refInt){
+    var val   = box.getAttribute('data-valor') || ''; // se você quiser, pode preencher 'data-valor' no PHP
+    // pega o valor original do tooltip (se tiver blocos “Valor/Criação/Vencimento/Pagamento”)
+    var orig  = box.dataset._origTip || box.getAttribute('data-tooltip') || '';
+
+    // datas “limpas”
+    var created = getCreatedYmd(box), due = getDueYmd(box), paid = getPaidYmd(box);
+    var refBr = isoToBr(String(refInt));
+
+    var head = 'Status: '+statusLabel+(refBr ? ' ('+refBr+')' : '');
+
+    // Se o tooltip original já traz o bloco de detalhes, mantemos após o cabeçalho
+    if (orig && /Valor:|Criação:|Vencimento:|Pagamento:/.test(orig)){
+      return head + '\n' + orig.replace(/^Status:[^\n]*\n?/, '');
+    }
+
+    // fallback enxuto (se não havia bloco detalhado)
+    return head
+      + (val   ? '\nValor: '+val : '')
+      + (created ? '\nCriação: '+isoToBr(created) : '')
+      + (due     ? '\nVencimento: '+isoToBr(due) : '')
+      + (paid    ? '\nPagamento: '+isoToBr(paid) : '');
+  }
+
+  function applyHistoricalByDate(refYmd){
+    var refInt = ymdToInt(refYmd);
+    if(!refInt){ clearHistorical(); return; }
+
+    window.__dashHistActive = true;
+
+    var banner = $id('dash-hist-banner'), lab = $id('dash-hist-date-label');
+    if(banner) banner.style.display = 'block';
+    if(lab)    lab.textContent = isoToBr(refYmd);
+
+    document.querySelectorAll('.dash-table tbody tr[id^="sub-"]').forEach(function(tr){
+      var bornCount = 0;
+      tr.querySelectorAll('.status-box').forEach(function(box){
+        captureOriginalOnce(box);
+
+        var res = resolveHistoricalStatus(box, refInt);
+        setStatus(box, res.status);
+        var tip = buildTooltip(box, res.statusLabel, refInt);
+        box.setAttribute('data-tooltip', tip);
+        box.setAttribute('aria-label', tip);
+        box.classList.remove('month-dim-hide');
+
+        var createdI = ymdToInt(getCreatedYmd(box));
+        if (createdI && createdI <= refInt) bornCount++;
+      });
+
+      if (bornCount === 0) {
+        tr.classList.add('hist-hide-row');
+        tr.style.display = 'none';
+      } else {
+        tr.classList.remove('hist-hide-row');
+        tr.style.display = '';
+      }
+    });
+
+    if (window.dashRegroupRows) { window.dashRegroupRows(); }
+    if (window.updateSummary)   window.updateSummary();
+  }
+
+  function clearHistorical(){
+    document.querySelectorAll('.dash-table tbody tr[id^="sub-"]').forEach(function(tr){
+      tr.classList.remove('hist-hide-row');
+      tr.style.display='';
+      tr.querySelectorAll('.status-box').forEach(function(box){
+        restoreOriginal(box);
+      });
+    });
+    var banner = $id('dash-hist-banner'); if(banner) banner.style.display='none';
+    window.__dashHistActive = false;
+
+    if (window.dashRegroupRows) { window.dashRegroupRows(); }
+    if (window.updateSummary)   window.updateSummary();
+  }
+
+  // expõe para teste manual no console:
+  window.__applyHistoricalByDate = applyHistoricalByDate;
+  window.__clearHistorical = clearHistorical;
+
+function initAutoHistorical(){
+  // Intencionalmente vazio: não auto-aplica histórico ao digitar ou mudar o campo
+  // A aplicação do histórico agora será feita SOMENTE pelos botões:
+  // - #dash-snapshot-apply (aplicar)
+  // - #dash-snapshot-clear (reset total)
+}
+
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', initAutoHistorical, {once:true});
+  } else {
+    initAutoHistorical();
+  }
+})();
+</script>
+
+<script>
+/* Ligações explícitas dos botões do histórico (sem auto-aplicar no input) */
+(function(){
+  function $id(id){ return document.getElementById(id); }
+
+  function clearMonthPickerHard(){
+    var mon = $id('dash-month-picker');
+    if (!mon) return;
+    mon.value = '';
+
+    // se jQuery UI Datepicker estiver presente, limpa o estado interno também
+    if (typeof jQuery !== 'undefined') {
+      var $mon = jQuery('#dash-month-picker');
+      if ($mon.length && $mon.data('datepicker')) {
+        $mon.datepicker('setDate', null);
+        $mon.val('');
+      }
+    }
+
+    // dispara eventos que o filtro já escuta (garante saída total do filtro de mês)
+    mon.dispatchEvent(new Event('dash:monthChanged'));
+    mon.dispatchEvent(new Event('change'));
+    mon.dispatchEvent(new Event('input'));
+  }
+
+  function bindHistoryButtons(){
+    var btnApply = $id('dash-snapshot-apply');
+    var btnClear = $id('dash-snapshot-clear');
+    var input    = $id('dash-snapshot-date');
+
+    // Botão "Histórico" = aplicar histórico SOMENTE quando clicar
+    if (btnApply) {
+      btnApply.addEventListener('click', function(e){
+        e.preventDefault();
+        var v = (input && input.value || '').trim();
+        if (!v) {
+          // sem data => não faz nada (ou, se preferir, poderíamos limpar histórico aqui)
+          return;
+        }
+        if (typeof window.__applyHistoricalByDate === 'function') {
+          window.__applyHistoricalByDate(v);
+        }
+      });
+    }
+
+    // Botão "Sair do histórico" = reset TOTAL (hard reset opcional)
+if (btnClear) {
+  btnClear.addEventListener('click', function(e){
+    e.preventDefault();
+
+    // 0) se quiser *garantir* F5 de verdade, ative esta flag
+    var HARD_RESET_ON_EXIT = false; // mude para true se quiser recarregar a página
+
+    // 1) desligar histórico *antes* de qualquer reaplicação
+    if (typeof window.__clearHistorical === 'function') {
+      window.__clearHistorical(); // agora não reaplica filtro internamente
+    }
+
+    // 2) limpar todos os inputs (histórico, mês, busca, curso)
+    if (input) input.value = ''; // data do histórico
+
+    // mês (inclui limpar o estado interno do jQuery UI datepicker)
+    (function clearMonthPickerHard(){
+      var mon = $id('dash-month-picker');
+      if (!mon) return;
+      mon.value = '';
+      if (typeof jQuery !== 'undefined') {
+        var $mon = jQuery('#dash-month-picker');
+        if ($mon.length && $mon.data('datepicker')) {
+          $mon.datepicker('setDate', null);
+          $mon.val('');
+        }
+      }
+      mon.dispatchEvent(new Event('dash:monthChanged'));
+      mon.dispatchEvent(new Event('change'));
+      mon.dispatchEvent(new Event('input'));
+    })();
+
+    var inp = $id('dash-search-input'); if (inp) inp.value = '';
+    var sel = $id('dash-course-filter'); if (sel) sel.value = '';
+
+    // 3) restaurar visual (linhas/boxes) e KPIs
+    if (typeof window.dashRegroupRows === 'function') window.dashRegroupRows();
+    if (typeof window.updateSummary   === 'function') window.updateSummary();
+
+    // 4) aplicar filtro final com tudo zerado
+    if (typeof window.dashApplyFilter === 'function') window.dashApplyFilter();
+
+    // 5) HARD RESET (opcional): simula F5
+    if (HARD_RESET_ON_EXIT) {
+      window.location.reload();
+    }
+  });
+}
+
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bindHistoryButtons, { once: true });
+  } else {
+    bindHistoryButtons();
+  }
+})();
+</script>
+
+<script>
+(function(){
+  function $id(id){ return document.getElementById(id); }
+
+  // Defina a menor e a maior data permitidas
+  var HIST_MIN = '2025-02-19';
+  var HIST_MAX = '<?php echo esc_js( date_i18n("Y-m-d", current_time("timestamp")) ); ?>';
+
+  function clampDate(v){
+    if (!v) return v;
+    if (v < HIST_MIN) return HIST_MIN;
+    if (v > HIST_MAX) return HIST_MAX;
+    return v;
+  }
+
+  function initHistoryDateBounds(){
+    var inp = $id('dash-snapshot-date');
+    if (!inp) return;
+
+    // Seta os limites nativos do input date
+    inp.setAttribute('min', HIST_MIN);
+    inp.setAttribute('max', HIST_MAX);
+
+    // Sempre que o usuário mexer, garante que fica na faixa
+    inp.addEventListener('input', function(){
+      var v = clampDate(inp.value);
+      if (v !== inp.value) inp.value = v;
+    });
+    inp.addEventListener('change', function(){
+      var v = clampDate(inp.value);
+      if (v !== inp.value) inp.value = v;
+    });
+
+    // Se por algum motivo houver valor inicial inválido, corrige
+    if (inp.value) {
+      var v0 = clampDate(inp.value);
+      if (v0 !== inp.value) inp.value = v0;
+    }
+
+    // Expõe para outros scripts (opcional)
+    window.__histMinYmd = HIST_MIN;
+    window.__histMaxYmd = HIST_MAX;
+    window.__clampHistYmd = clampDate;
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initHistoryDateBounds, { once:true });
+  } else {
+    initHistoryDateBounds();
+  }
+})();
+</script>
+
+
+
 <?php
 $html .= ob_get_clean();
 
-    return $html;}
+    return $html;
+}
 add_shortcode('dashboard_assinantes_e_pedidos','mostrar_dashboard_assinantes');
