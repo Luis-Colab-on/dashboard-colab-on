@@ -444,6 +444,9 @@ $css .= $css_extra;
       <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
       <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
       <button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button>
+
+      <!-- baixar csv -->
+      <button type="button" id="dash-export-xls-btn" class="dash-btn" aria-label="Baixar relatório XLS">Baixar relatório (XLS)</button>
     </div>
 
     <!-- 2ª linha: controles do modo histórico -->
@@ -839,9 +842,215 @@ ob_start();
   updateSummary();
   if(inp){ inp.focus(); }
 }
-
-
   window.dashApplyFilter = applyFilter;
+
+    // ======== EXPORTAÇÃO XLS (somente o que está visível), agrupando por curso ========
+  function collectVisibleRows(){
+    return [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'))
+      .filter(function(tr){ return tr.style.display !== 'none' && !tr.classList.contains('hist-hide-row'); });
+  }
+  function collectVisibleBoxes(tr){
+    return [].slice.call(tr.querySelectorAll('.status-box'))
+      .filter(function(box){ return !box.classList.contains('month-dim-hide'); });
+  }
+  function statusLabelFromClass(box){
+    if (box.classList.contains('paid')) return 'Pago';
+    if (box.classList.contains('overdue')) return 'Em atraso';
+    if (box.classList.contains('pending')) return 'Pendente';
+    return 'Não criada';
+  }
+  function colorFromClass(box){ // fundo da célula
+    if (box.classList.contains('paid')) return '#16a34a';     // verde
+    if (box.classList.contains('overdue')) return '#e11d48';  // vermelho
+    if (box.classList.contains('pending')) return '#f59e0b';  // amarelo
+    return '#e5e7eb';                                         // cinza (não criada)
+  }
+  function fontColorFor(bg){ // contraste legível
+    // cores escuras -> branco | claras -> preto
+    // heurística simples (luma aproximada)
+    var c = bg.replace('#','');
+    if (c.length === 3) c = c.split('').map(function(x){return x+x;}).join('');
+    var r = parseInt(c.substr(0,2),16), g = parseInt(c.substr(2,2),16), b = parseInt(c.substr(4,2),16);
+    var luma = 0.2126*r + 0.7152*g + 0.0722*b;
+    return luma < 140 ? '#ffffff' : '#111111';
+  }
+  function formatDateBR(isoOrBr){
+    var s = String(isoOrBr||'').trim();
+    var mISO = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (mISO) return mISO[3]+'/'+mISO[2]+'/'+mISO[1];
+    var mBR = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (mBR) return ('0'+mBR[1]).slice(-2)+'/'+('0'+mBR[2]).slice(-2)+'/'+mBR[3];
+    return '';
+  }
+  function buildCourseMap(){
+    var s=document.getElementById('dash-course-filter'), map={};
+    if(s){ for(var i=0;i<s.options.length;i++){ var opt=s.options[i]; map[String(opt.value||'')]=opt.textContent||opt.innerText||opt.text||''; } }
+    return map;
+  }
+  function getCourseNameForRow(tr, courseMap){
+    var cid   = String(tr.getAttribute('data-course-id')||'');
+    var cbase = String(tr.getAttribute('data-course-base-id')||'');
+    return (courseMap[cid] || courseMap[cbase] || 'Curso não identificado');
+  }
+
+  function buildXlsHtmlFromVisible(){
+    var courseMap = buildCourseMap();
+    var rows = collectVisibleRows();
+
+    // Agrupa linhas por curso
+    var groups = {};        // { 'Nome do Curso' : [tr, tr, ...] }
+    var maxBoxesByCourse={}; // { 'Nome do Curso' : maxVisiveis }
+    rows.forEach(function(tr){
+      var name = getCourseNameForRow(tr, courseMap);
+      if(!groups[name]) groups[name] = [];
+      groups[name].push(tr);
+    });
+
+    // Descobre o máximo de parcelas visíveis por curso (para criar colunas fixas)
+    Object.keys(groups).forEach(function(course){
+      var maxN = 0;
+      groups[course].forEach(function(tr){
+        var n = collectVisibleBoxes(tr).length;
+        if(n > maxN) maxN = n;
+      });
+      maxBoxesByCourse[course] = maxN;
+    });
+
+    // Cabeçalho CSS para o Excel (tabela HTML)
+    var css = `
+      <style>
+        table { border-collapse: collapse; width:100%; font-family: Arial, sans-serif; font-size: 12px; }
+        th, td { border:1px solid #444; padding:6px 8px; vertical-align: top; }
+        th { background:#0a66c2; color:#fff; text-transform:uppercase; font-weight:700; }
+        .course-title { background:#eef2f7; font-weight:700; font-size:14px; }
+        .muted { color:#555; }
+      </style>
+    `;
+
+    // Captura contexto atual (opcional, cabeçalho do relatório)
+    var sel = document.getElementById('dash-course-filter');
+    var inp = document.getElementById('dash-search-input');
+    var mon = document.getElementById('dash-month-picker');
+    var his = document.getElementById('dash-snapshot-date');
+    var histOn = !!window.__dashHistActive;
+
+    var contextHtml = `
+      <table>
+        <tr><td colspan="3"><strong>Relatório do Dashboard (itens visíveis)</strong></td></tr>
+        <tr><td>Curso selecionado:</td><td colspan="2">${sel && sel.options[sel.selectedIndex] ? (sel.options[sel.selectedIndex].text || '') : 'Todos'}</td></tr>
+        <tr><td>Busca:</td><td colspan="2">${inp ? (inp.value || '—') : '—'}</td></tr>
+        <tr><td>Mês (Criação):</td><td colspan="2">${mon ? (mon.value || '—') : '—'}</td></tr>
+        <tr><td>Histórico:</td><td colspan="2">${histOn ? (his && his.value ? formatDateBR(his.value) : 'Ativo') : 'Inativo'}</td></tr>
+      </table>
+      <br/>
+    `;
+
+    // Para cada curso, monta uma tabela com colunas fixas:
+    // | Nome | E-mail | CPF | Status Assinatura | Parcela 1 | Parcela 2 | ... |
+    // Cada "Parcela N" traz "Status | Criação: dd/mm/aaaa | Venc: ... | Pag: ..." e é colorida.
+    var body = '';
+    Object.keys(groups).sort().forEach(function(course){
+      var maxCols = maxBoxesByCourse[course] || 0;
+
+      var theadCols = `
+        <tr>
+          <th>Nome</th>
+          <th>E-mail</th>
+          <th>CPF</th>
+          <th>Status da Assinatura</th>
+          ${Array.from({length:maxCols}).map(function(_,i){ return '<th>Parcela '+(i+1)+'</th>'; }).join('')}
+        </tr>
+      `;
+
+      var trsHtml = groups[course].map(function(tr){
+        var tds = tr.getElementsByTagName('td');
+        var nome  = tds[0] ? tds[0].textContent.trim() : '';
+        var email = tds[1] ? tds[1].textContent.trim() : '';
+        var cpf   = tds[2] ? tds[2].textContent.trim() : '';
+        var stat  = tds[4] ? tds[4].textContent.trim() : '';
+
+        // caixas visíveis, na ordem
+        var boxes = collectVisibleBoxes(tr);
+
+        // Constrói as células de parcelas (até maxCols), pintando o fundo
+        var parcelaTds = '';
+        for (var i=0;i<maxCols;i++){
+          if (i < boxes.length){
+            var box = boxes[i];
+            var bg  = colorFromClass(box);
+            var fc  = fontColorFor(bg);
+
+            var st  = statusLabelFromClass(box);
+            var cre = box.getAttribute('data-created-ymd') || box.getAttribute('data-de-criacao') || '';
+            var due = box.getAttribute('data-due-ymd')     || box.getAttribute('data-de-vencimento') || '';
+            var pay = box.getAttribute('data-paid-ymd')    || box.getAttribute('data-de-pagamento') || '';
+
+            var txt = [
+              st,
+              (formatDateBR(cre) ? 'Criação: '+formatDateBR(cre) : ''),
+              (formatDateBR(due) ? 'Venc: '+formatDateBR(due) : ''),
+              (formatDateBR(pay) ? 'Pag: '+formatDateBR(pay) : '')
+            ].filter(Boolean).join(' | ');
+
+            parcelaTds += `<td style="background:${bg};color:${fc}">${txt}</td>`;
+          } else {
+            parcelaTds += '<td class="muted">—</td>';
+          }
+        }
+
+        return `
+          <tr>
+            <td>${nome}</td>
+            <td>${email}</td>
+            <td>${cpf}</td>
+            <td>${stat}</td>
+            ${parcelaTds}
+          </tr>
+        `;
+      }).join('');
+
+      body += `
+        <table>
+          <tr><td class="course-title" colspan="${4 + maxCols}">Curso: ${course}</td></tr>
+          <thead>${theadCols}</thead>
+          <tbody>${trsHtml || '<tr><td colspan="'+(4+maxCols)+'"><em>Nenhum registro visível</em></td></tr>'}</tbody>
+        </table>
+        <br/>
+      `;
+    });
+
+    // Envelopa em HTML “Excel”
+    var html = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office"
+            xmlns:x="urn:schemas-microsoft-com:office:excel"
+            xmlns="http://www.w3.org/TR/REC-html40">
+        <head>
+          <meta charset="utf-8" />
+          ${css}
+        </head>
+        <body>
+          ${contextHtml}
+          ${body || '<p><em>Nenhum dado visível para exportar.</em></p>'}
+        </body>
+      </html>
+    `;
+    return html;
+  }
+
+  function downloadXlsVisible(){
+    var html = buildXlsHtmlFromVisible();
+    var blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    var ts   = new Date();
+    var iso  = ts.toISOString().slice(0,19).replace(/[:T]/g,'-');
+    a.href = url;
+    a.download = 'relatorio-dashboard-visivel-' + iso + '.xls';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
 
   function init(){
     document.addEventListener('click', function(ev){
@@ -855,6 +1064,15 @@ ob_start();
         clearFilter();
       }
     });
+
+        // Botão de exportação XLS
+    var expX = $id('dash-export-xls-btn');
+    if (expX) {
+      expX.addEventListener('click', function(ev){
+        ev.preventDefault();
+        downloadXlsVisible();
+      });
+    }
 
     var mon=$id('dash-month-picker');
     if(mon){
