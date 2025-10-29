@@ -256,6 +256,21 @@ function dash_get_cycles_from_wc_subscription_order($order_id) {
     return ($cycles >= 0) ? $cycles : null;
 }
 
+function dash_get_product_name($product_id){
+    $product_id = (int)$product_id;
+    if (!$product_id) return '';
+    $base_id = dash_maybe_get_parent_product_id($product_id);
+
+    $name = '';
+    if (function_exists('wc_get_product')) {
+        $p = wc_get_product($base_id);
+        if ($p) $name = $p->get_name();
+    }
+    if (!$name) $name = get_post_field('post_title', $base_id);
+    if (!$name) $name = 'Produto #'.$base_id;
+    return $name;
+}
+
 /**
  * =============================================================
  * 3) Renderização do Dashboard
@@ -268,6 +283,13 @@ function mostrar_dashboard_assinantes($atts = []) {
 
     $filter_id = absint($raw);
     $filter_base_id = $filter_id ? dash_maybe_get_parent_product_id($filter_id) : 0;
+
+    $locked_by_id = $filter_id > 0;
+    $locked_course_name = '';
+    if ($locked_by_id) {
+        $locked_course_name = dash_get_product_name($filter_base_id ?: $filter_id);
+    }
+
 
     $subs = dash_fetch_all_asaas_subscriptions();
     $agora = current_time('timestamp');
@@ -303,6 +325,15 @@ function mostrar_dashboard_assinantes($atts = []) {
             $name_cache[$display_id] = $name;
         }
         $course_options .= '<option value="'.esc_attr($__cid).'">'.esc_html($name_cache[$display_id]).'</option>';
+    }
+
+    $course_select_html = '';
+    if ($locked_by_id) {
+        $course_select_html = '';
+    } else {
+        $course_select_html = '<select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'
+                            . $course_options
+                            . '</select>';
     }
 
     $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
@@ -420,6 +451,13 @@ $css = '<style>
 .dash-hist-row .dash-input{ flex:0 0 190px; max-width:220px; } 
 </style>';
 
+$css .= '<style>
+.dash-title{margin:0 0 4px; font-weight:800; font-size:1.25rem;}
+.dash-locked-course{margin:0 0 12px; color:#374151; font-size:.98rem;}
+.dash-locked-course strong{font-weight:700;}
+</style>';
+
+
 $css_extra = '<style>
 /* Esconde parcelas fora do mês escolhido e/ou a linha inteira quando aplicável */
 .month-dim-hide { display:none !important; }
@@ -432,14 +470,26 @@ $css_extra = '<style>
 
 $css .= $css_extra;
 
+    $heading  = '<div class="dash-wrap">';
+    $heading .= '<h2 class="dash-title">Dashboard de assinaturas</h2>';
+    if ($locked_by_id) {
+        $heading .= '<div class="dash-locked-course">Curso: <strong>'.esc_html($locked_course_name).'</strong></div>';
+        $locked_meta = $locked_by_id
+          ? '<div id="dash-locked-meta" data-locked="1" data-course-id="'.esc_attr($filter_id).'" data-course-base-id="'.esc_attr($filter_base_id ?: $filter_id).'" data-course-name="'.esc_attr($locked_course_name).'"></div>'
+          : '<div id="dash-locked-meta" data-locked="0"></div>';
+        $heading .= $locked_meta;
+
+    }
+    $heading .= '</div>';
+
     // ===== RESUMO =====
-    $summary = '<div class="dash-summary" role="region" aria-label="Resumo das assinaturas"><div class="dash-kpi total" role="status" aria-live="polite"><div class="dash-kpi-label">Assinaturas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span><small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div></div><div class="dash-kpi emdia" role="status" aria-live="polite"><div class="dash-kpi-label">Em Dia</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span><small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div></div><div class="dash-kpi atraso" role="status" aria-live="polite"><div class="dash-kpi-label">Em Atraso</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span><small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div></div><div class="dash-kpi cancel" role="status" aria-live="polite"><div class="dash-kpi-label">Canceladas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span><small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div></div></div><div class="dash-composition" aria-label="Composição por status (visível)"><div class="dash-stacked"><span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span><span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span><span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span></div><div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div></div><div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
+    $summary = $heading . '<div class="dash-summary" role="region" aria-label="Resumo das assinaturas"><div class="dash-kpi total" role="status" aria-live="polite"><div class="dash-kpi-label">Assinaturas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span><small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div></div><div class="dash-kpi emdia" role="status" aria-live="polite"><div class="dash-kpi-label">Em Dia</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span><small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div></div><div class="dash-kpi atraso" role="status" aria-live="polite"><div class="dash-kpi-label">Em Atraso</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span><small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div></div><div class="dash-kpi cancel" role="status" aria-live="polite"><div class="dash-kpi-label">Canceladas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span><small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div></div></div><div class="dash-composition" aria-label="Composição por status (visível)"><div class="dash-stacked"><span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span><span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span><span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span></div><div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div></div><div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
 
     // ===== Barra de busca + Histórico =====
     $search = '<div class="dash-wrap">'.$summary.'
     <!-- 1ª linha: filtros normais -->
     <div class="dash-search" role="search" aria-label="Filtrar assinantes">
-      <select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'.$course_options.'</select>
+      '.$course_select_html.'
       <input type="text" id="dash-month-picker" class="dash-input dash-select" placeholder="Selecionar mês/ano" aria-label="Selecionar mês e ano" readonly>
       <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
       <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
@@ -712,11 +762,6 @@ ob_start();
   }
   window.updateSummary = updateSummary;
 
-  function buildCourseMap(){
-    var s=$id('dash-course-filter'), map={};
-    if(s){ for(var i=0;i<s.options.length;i++){ var opt=s.options[i]; map[String(opt.value||'')]=opt.textContent||opt.innerText||opt.text||''; } }
-    return map;
-  }
   function setRowTooltips(courseMap){
     var rows=document.querySelectorAll('.dash-table tbody tr[id^="sub-"]');
     rows.forEach(function(tr){
@@ -883,10 +928,23 @@ ob_start();
     return '';
   }
   function buildCourseMap(){
-    var s=document.getElementById('dash-course-filter'), map={};
-    if(s){ for(var i=0;i<s.options.length;i++){ var opt=s.options[i]; map[String(opt.value||'')]=opt.textContent||opt.innerText||opt.text||''; } }
+    var map = {};
+    var s = document.getElementById('dash-course-filter');
+    if (s){
+      for (var i=0;i<s.options.length;i++){
+        var opt = s.options[i];
+        map[String(opt.value || '')] = opt.textContent || opt.innerText || opt.text || '';
+      }
+    }
+    // Completa com o curso travado (quando o select não existe/está oculto)
+    var lm = getLockedMeta();
+    if (lm.locked){
+      if (lm.id)     map[lm.id] = lm.name || map[lm.id] || '';
+      if (lm.baseId) map[lm.baseId] = lm.name || map[lm.baseId] || '';
+    }
     return map;
   }
+
   function getCourseNameForRow(tr, courseMap){
     var cid   = String(tr.getAttribute('data-course-id')||'');
     var cbase = String(tr.getAttribute('data-course-base-id')||'');
@@ -898,8 +956,8 @@ ob_start();
     var rows = collectVisibleRows();
 
     // Agrupa linhas por curso
-    var groups = {};        // { 'Nome do Curso' : [tr, tr, ...] }
-    var maxBoxesByCourse={}; // { 'Nome do Curso' : maxVisiveis }
+    var groups = {};        
+    var maxBoxesByCourse={}; 
     rows.forEach(function(tr){
       var name = getCourseNameForRow(tr, courseMap);
       if(!groups[name]) groups[name] = [];
@@ -927,23 +985,32 @@ ob_start();
       </style>
     `;
 
-    // Captura contexto atual (opcional, cabeçalho do relatório)
     var sel = document.getElementById('dash-course-filter');
     var inp = document.getElementById('dash-search-input');
     var mon = document.getElementById('dash-month-picker');
     var his = document.getElementById('dash-snapshot-date');
     var histOn = !!window.__dashHistActive;
 
+    // NOVO: usa o meta do curso travado se existir
+    var lm = getLockedMeta();
+    var selectedCourseLabel = 'Todos';
+    if (lm.locked){
+      selectedCourseLabel = lm.name || ('#' + (lm.baseId || lm.id));
+    } else if (sel && sel.options[sel.selectedIndex]){
+      selectedCourseLabel = sel.options[sel.selectedIndex].text || 'Todos';
+    }
+
     var contextHtml = `
       <table>
         <tr><td colspan="3"><strong>Relatório do Dashboard (itens visíveis)</strong></td></tr>
-        <tr><td>Curso selecionado:</td><td colspan="2">${sel && sel.options[sel.selectedIndex] ? (sel.options[sel.selectedIndex].text || '') : 'Todos'}</td></tr>
+        <tr><td>Curso selecionado:</td><td colspan="2">${selectedCourseLabel}</td></tr>
         <tr><td>Busca:</td><td colspan="2">${inp ? (inp.value || '—') : '—'}</td></tr>
         <tr><td>Mês (Criação):</td><td colspan="2">${mon ? (mon.value || '—') : '—'}</td></tr>
-        <tr><td>Histórico:</td><td colspan="2">${histOn ? (his && his.value ? formatDateBR(his.value) : 'Ativo') : 'Inativo'}</td></tr>
+        <tr><td>Histórico:</td><td colspan="2">${histOn ? (his && his.value ? his.value.split('-').reverse().join('/') : 'Ativo') : 'Inativo'}</td></tr>
       </table>
       <br/>
     `;
+
 
     // Para cada curso, monta uma tabela com colunas fixas:
     // | Nome | E-mail | CPF | Status Assinatura | Parcela 1 | Parcela 2 | ... |
@@ -1050,6 +1117,17 @@ ob_start();
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+    function getLockedMeta(){
+    var el = document.getElementById('dash-locked-meta');
+    if(!el) return { locked:false, id:'', baseId:'', name:'' };
+    return {
+      locked: el.getAttribute('data-locked') === '1',
+      id: String(el.getAttribute('data-course-id') || ''),
+      baseId: String(el.getAttribute('data-course-base-id') || ''),
+      name: el.getAttribute('data-course-name') || ''
+    };
   }
 
   function init(){
@@ -1303,7 +1381,7 @@ function collectAllowedMonthsByCreation(){
 </script>
 
 <script>
-/* Histórico (criação + vencimento + pagamento), sem botões — com atualização interna */
+/* Histórico (criação + vencimento + pagamento), */
 (function(){
   function $id(id){ return document.getElementById(id); }
 
@@ -1324,8 +1402,10 @@ function collectAllowedMonthsByCreation(){
     box.dataset._origAria  = box.getAttribute('aria-label')   || '';
   }
   function restoreOriginal(box){
-    var c = box.dataset._origClass || 'future';
+    if (!box.dataset || box.dataset._histcap !== '1') return;
+    var c = box.dataset._origClass || 'future';    
     setStatus(box, c);
+    
     if (box.dataset._origTip){ box.setAttribute('data-tooltip', box.dataset._origTip); } else { box.removeAttribute('data-tooltip'); }
     if (box.dataset._origAria){ box.setAttribute('aria-label', box.dataset._origAria); } else { box.removeAttribute('aria-label'); }
     box.removeAttribute('title');
@@ -1604,56 +1684,79 @@ if (btnClear) {
 <script>
 (function(){
   function $id(id){ return document.getElementById(id); }
-
-  // Defina a menor e a maior data permitidas
-  var HIST_MIN = '2025-02-19';
-  var HIST_MAX = '<?php echo esc_js( date_i18n("Y-m-d", current_time("timestamp")) ); ?>';
-
-  function clampDate(v){
-    if (!v) return v;
-    if (v < HIST_MIN) return HIST_MIN;
-    if (v > HIST_MAX) return HIST_MAX;
-    return v;
+  function toISO(brOrIso){
+    var s = String(brOrIso||'').trim();
+    var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); // dd/mm/aaaa
+    if (m){
+      var dd=('0'+parseInt(m[1],10)).slice(-2);
+      var mm=('0'+parseInt(m[2],10)).slice(-2);
+      return m[3]+'-'+mm+'-'+dd;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;        // aaaa-mm-dd
+    return '';
+  }
+  function todayISO(){
+    var d=new Date();
+    var mm=('0'+(d.getMonth()+1)).slice(-2);
+    var dd=('0'+d.getDate()).slice(-2);
+    return d.getFullYear()+'-'+mm+'-'+dd;
+  }
+  function findMinDateFromBoxes(){
+    var min = null;
+    document.querySelectorAll('.status-box').forEach(function(box){
+      // procura nos ISO primeiro
+      ['data-created-ymd','data-due-ymd','data-paid-ymd','data-de-criacao','data-de-vencimento','data-de-pagamento'].forEach(function(attr){
+        var raw = box.getAttribute(attr) || '';
+        var iso = toISO(raw);
+        if (iso){
+          if (!min || iso < min){ min = iso; }
+        }
+      });
+    });
+    return min; // ex.: '2025-03-04' ou null
   }
 
-  function initHistoryDateBounds(){
+  function setHistDateLimits(){
     var inp = $id('dash-snapshot-date');
     if (!inp) return;
 
-    // Seta os limites nativos do input date
-    inp.setAttribute('min', HIST_MIN);
-    inp.setAttribute('max', HIST_MAX);
+    var minISO = findMinDateFromBoxes();
+    var maxISO = todayISO();
 
-    // Sempre que o usuário mexer, garante que fica na faixa
-    inp.addEventListener('input', function(){
-      var v = clampDate(inp.value);
-      if (v !== inp.value) inp.value = v;
-    });
-    inp.addEventListener('change', function(){
-      var v = clampDate(inp.value);
-      if (v !== inp.value) inp.value = v;
-    });
-
-    // Se por algum motivo houver valor inicial inválido, corrige
-    if (inp.value) {
-      var v0 = clampDate(inp.value);
-      if (v0 !== inp.value) inp.value = v0;
+    if (!minISO){ 
+      // Nenhuma data encontrada nas parcelas → não limitar
+      return;
     }
 
-    // Expõe para outros scripts (opcional)
-    window.__histMinYmd = HIST_MIN;
-    window.__histMaxYmd = HIST_MAX;
-    window.__clampHistYmd = clampDate;
+    // Define limites no input[type=date]
+    inp.setAttribute('min', minISO);
+    inp.setAttribute('max', maxISO);
+
+    // Placeholder informativo (opcional)
+    var minBR = minISO.split('-').reverse().join('/');
+    var maxBR = maxISO.split('-').reverse().join('/');
+    if (!inp.value){
+      inp.placeholder = 'De ' + minBR + ' a ' + maxBR;
+    }
+
+    // Validação/normalização quando o usuário muda o valor
+    function clampValue(){
+      var v = (inp.value || '').trim();
+      if (!v) return;
+      if (v < minISO) inp.value = minISO;
+      if (v > maxISO) inp.value = maxISO;
+    }
+    inp.addEventListener('change', clampValue);
+    inp.addEventListener('input', clampValue);
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initHistoryDateBounds, { once:true });
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', setHistDateLimits, { once:true });
   } else {
-    initHistoryDateBounds();
+    setHistDateLimits();
   }
 })();
 </script>
-
 
 
 <?php
