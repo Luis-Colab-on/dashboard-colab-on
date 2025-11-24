@@ -256,6 +256,79 @@ function dash_get_cycles_from_wc_subscription_order($order_id) {
     return ($cycles >= 0) ? $cycles : null;
 }
 
+/**
+ * Obtém a taxa de inscrição (signup fee) configurada no produto/assinatura.
+ * Retorna float >= 0; 0 significa não configurada.
+ */
+function dash_get_subscription_signup_fee($product_id) {
+    static $cache = [];
+    $product_id = (int)$product_id;
+    if (!$product_id) return 0.0;
+    if (isset($cache[$product_id])) return $cache[$product_id];
+
+    $fee = 0.0;
+    $base_id = dash_maybe_get_parent_product_id($product_id);
+
+    if (function_exists('wc_get_product') && class_exists('WC_Subscriptions_Product')) {
+        try {
+            $product_obj = wc_get_product($base_id);
+            if ($product_obj) {
+                $raw = \WC_Subscriptions_Product::get_sign_up_fee($product_obj);
+                if ($raw !== '' && $raw !== null) {
+                    $fee = max(0.0, (float)$raw);
+                }
+            }
+        } catch (\Throwable $e) {}
+    }
+
+    if ($fee <= 0 && function_exists('get_post_meta')) {
+        $meta_keys = ['_subscription_sign_up_fee','subscription_sign_up_fee','assinatura_taxa_inscricao','taxa_inscricao','inscricao_fee'];
+        foreach ($meta_keys as $k) {
+            $raw = get_post_meta($base_id, $k, true);
+            if ($raw !== '' && $raw !== null) {
+                $fee = max(0.0, (float)$raw);
+                if ($fee > 0) break;
+            }
+        }
+    }
+
+    return $cache[$product_id] = $fee;
+}
+
+/**
+ * Separa pagamentos que parecem ser taxa de inscrição para não contarem como parcelas.
+ * Retorna ['payments'=>[], 'fees'=>[]]
+ */
+function dash_filter_signup_fee_payments(array $payments, float $signup_fee_amount = 0.0) {
+    $out = ['payments'=>[],'fees'=>[]];
+    $signup_fee_amount = ($signup_fee_amount > 0) ? (float)$signup_fee_amount : 0.0;
+
+    foreach ($payments as $p) {
+        $val = isset($p['value']) ? (float)$p['value'] : null;
+        $desc = strtolower(trim((string)($p['description'] ?? '')));
+        $charge = strtolower(trim((string)($p['chargeType'] ?? ($p['paymentType'] ?? ''))));
+        $inst = (isset($p['installmentNumber']) && is_numeric($p['installmentNumber'])) ? (int)$p['installmentNumber'] : null;
+
+        $desc_is_fee = ($desc !== '' && preg_match('/taxa\s+de\s+inscri[cç][ãa]o|inscri[cç][ãa]o\s+.*taxa|matr[ií]cula/', $desc));
+        $charge_is_fee = in_array($charge, ['signupfee','taxa_inscricao','enrollment_fee','matricula','signup'], true);
+        $value_matches_fee = ($signup_fee_amount > 0 && $val !== null && abs($val - $signup_fee_amount) < 0.01);
+        $inst_hint_fee = ($inst !== null && $inst <= 0);
+
+        $is_fee = $charge_is_fee
+            || ($desc_is_fee && ($inst_hint_fee || $value_matches_fee || $charge_is_fee))
+            || ($value_matches_fee && ($inst_hint_fee || $charge_is_fee))
+            || ($inst_hint_fee && $desc_is_fee);
+
+        if ($is_fee) {
+            $out['fees'][] = $p;
+            continue;
+        }
+        $out['payments'][] = $p;
+    }
+
+    return $out;
+}
+
 function dash_get_product_name($product_id){
     $product_id = (int)$product_id;
     if (!$product_id) return '';
@@ -269,6 +342,32 @@ function dash_get_product_name($product_id){
     if (!$name) $name = get_post_field('post_title', $base_id);
     if (!$name) $name = 'Produto #'.$base_id;
     return $name;
+}
+
+/**
+ * Minify CSS snippets generated on the fly.
+ */
+function dash_minify_css($css) {
+    if (!is_string($css) || $css === '') {
+        return '';
+    }
+    $css = preg_replace('!/\*.*?\*/!s', '', $css);
+    $css = preg_replace('/\s*([{};:,])\s*/', '$1', $css);
+    $css = preg_replace('/;}/', '}', $css);
+    $css = preg_replace('/\s+/', ' ', $css);
+    return trim($css);
+}
+
+/**
+ * Light JS minifier (keeps semantics; trims trailing whitespace/blank lines).
+ */
+function dash_minify_js($js) {
+    if (!is_string($js) || $js === '') {
+        return '';
+    }
+    $js = preg_replace('/[ \t]+(\r?\n)/', '$1', $js);
+    $js = preg_replace('/(\r?\n){2,}/', "\n", $js);
+    return trim($js);
 }
 
 /**
@@ -346,6 +445,18 @@ function mostrar_dashboard_assinantes($atts = []) {
         $subscription_pk_id = (int)($sub['id'] ?? 0);
         $subscriptionID = (string)($sub['subscriptionID'] ?? '');
         $pid_for_select = (int)($pid_map[$subscription_pk_id] ?? 0);
+        $has_payments_entry = array_key_exists($subscriptionID, $pay_map);
+        $payments_raw = array_values($pay_map[$subscriptionID] ?? []);
+        $signup_fee_amount = dash_get_subscription_signup_fee($pid_for_select);
+        $split_payments = dash_filter_signup_fee_payments($payments_raw, $signup_fee_amount);
+        $payments = array_values($split_payments['payments']);
+        $signup_fees = array_values($split_payments['fees']);
+        $signup_fee_count = count($signup_fees);
+        $signup_fee_payment = $signup_fees ? $signup_fees[0] : null; // pega a 1ª taxa (se houver)
+        if ($signup_fee_amount > 0 && $signup_fee_count === 0) {
+            // Garante exibição do box mesmo que ainda não haja linha de pagamento marcada como taxa
+            $signup_fee_count = 1;
+        }
 
         if ($filter_id) {
             $pid_base = dash_maybe_get_parent_product_id($pid_for_select);
@@ -353,11 +464,10 @@ function mostrar_dashboard_assinantes($atts = []) {
         }
 
         $stat_raw = strtoupper(trim($sub['status'] ?? ''));
-        $payments = array_values($pay_map[$subscriptionID] ?? []);
-        if ((isset($pay_map[$subscriptionID]) && empty($payments))) continue;
+        if ($has_payments_entry && empty($payments) && empty($signup_fees) && $signup_fee_amount <= 0) continue;
 
         if (in_array($stat_raw,$expiredStatuses,true)) {
-            $grupos['canceladas'][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select];
+            $grupos['canceladas'][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select,'signup_meta'=>['signup_fee_amount'=>$signup_fee_amount,'signup_fee_count'=>$signup_fee_count,'signup_fee_payment'=>$signup_fee_payment]];
             continue;
         }
 
@@ -375,7 +485,7 @@ function mostrar_dashboard_assinantes($atts = []) {
         }
 
         $key = $hasOverdue ? 'em_atraso' : 'em_dia';
-        $grupos[$key][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select];
+        $grupos[$key][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select,'signup_meta'=>['signup_fee_amount'=>$signup_fee_amount,'signup_fee_count'=>$signup_fee_count,'signup_fee_payment'=>$signup_fee_payment]];
     }
 
     $cnt_dia = count($grupos['em_dia']);
@@ -389,11 +499,11 @@ function mostrar_dashboard_assinantes($atts = []) {
     $pct_canceladas = $cnt_total > 0 ? round(($cnt_canceladas / $cnt_total) * 100) : 0;
 
 // ===== CSS =====
-$css = '<style>
+$css_source = <<<'CSS'
 :root{--dash-primary:#0a66c2;--dash-primary-dark:#084a8f;--dash-text:#1f2937;--dash-muted:#6b7280;--dash-border:#e5e7eb;--paid:#16a34a;--overdue:#e11d48;--pending:#f59e0b;--future:#e5e7eb;--box-border:rgba(0,0,0,.35);}
 .dash-wrap{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";color:var(--dash-text);}
 .dash-h3{margin:24px 0 8px;font-size:1.125rem;font-weight:700;}
-.dash-table{width:100%;border-collapse:separate;border-spacing:0;margin:8px 0 24px;font-size:.95rem;box-shadow:0 1px 2px rgba(0,0,0,.04);border:2px solid #000;border-radius:10px;overflow:visible;}
+.dash-table{width:100%;min-width:720px;border-collapse:separate;border-spacing:0;margin:8px 0 24px;font-size:.95rem;box-shadow:0 1px 2px rgba(0,0,0,.04);border:2px solid #000;border-radius:10px;overflow:visible;}
 .dash-table thead th{background:var(--dash-primary);color:#fff;padding:10px 8px;text-transform:uppercase;font-weight:600;letter-spacing:.03em;}
 .dash-table th,.dash-table td{padding:10px 8px;text-align:center;border-bottom:2px solid rgba(0,0,0,0.8);transition:background .15s ease,border-color .15s ease;}
 .dash-table td + td,.dash-table th + th{border-left:2px solid rgba(0,0,0,0.8);}
@@ -416,6 +526,7 @@ $css = '<style>
 .status-box[data-tooltip]:hover::before,.status-box[data-tooltip]:focus-visible::before{content:"";position:absolute;bottom:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-top-color:rgba(17,24,39,.96);}
 .dash-table tbody tr[id]{position:relative;z-index:1;}
 .dash-table tbody tr[data-tooltip]:hover::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:rgba(17,24,39,.96);color:#fff;padding:8px 10px;border-radius:6px;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;max-width:min(26rem, calc(100% - 24px));text-align:left;font-size:.8em;line-height:1.3;z-index:9999;pointer-events:none;}
+.dash-table tbody tr.row-tooltip-suspended::after,.dash-table tbody tr.row-tooltip-suspended::before{display:none!important;}
 .debug-info{display:none !important;}
 .dash-kpi{border:2px solid #000;border-radius:10px;padding:10px 12px;background:#fafafa;box-shadow:0 1px 2px rgba(0,0,0,.04);}
 .dash-kpi .dash-kpi-label{font-size:.82rem;color:#374151;text-transform:uppercase;letter-spacing:.03em;}
@@ -427,8 +538,6 @@ $css = '<style>
 .dash-kpi.cancel .dash-kpi-perc{color:#111827;}
 .dash-summary-note{margin:6px 0 0;font-size:.9rem;color:#374151;}
 .dash-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:8px 0 10px;align-items:stretch;}
-@media (max-width:980px){.dash-summary{grid-template-columns:repeat(2,1fr);}}
-@media (max-width:560px){.dash-summary{grid-template-columns:1fr;}}
 .dash-kpi{display:flex;flex-direction:column;gap:6px;}
 .dash-kpi-bar{width:100%;height:8px;background:#eef2f7;border-radius:6px;overflow:hidden;border:1px solid var(--dash-border);}
 .dash-kpi-bar > span{display:block;height:100%;width:0%;transition:width .25s ease;}
@@ -447,26 +556,62 @@ $css = '<style>
 .dash-select.dash-input{padding-right:28px;}
 /* Banner do modo histórico */
 .dash-hist-banner{margin:6px 0 10px;padding:8px 12px;border:1px dashed #6b7280;border-radius:8px;background:#fffbea;color:#374151;font-size:.92rem}
-.dash-hist-row{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 8px;}
-.dash-hist-row .dash-input{ flex:0 0 190px; max-width:220px; } 
-</style>';
+.dash-hist-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px;}
+.dash-hist-row .dash-input{flex:0 0 190px;max-width:220px;}
+.dash-legend{display:flex;gap:14px;align-items:center;margin:4px 0 10px;flex-wrap:wrap;font-size:.9rem;color:#374151;}
+.dash-table-scroll{width:100%;-webkit-overflow-scrolling:touch;margin-bottom:18px;}
+.dash-table-scroll::-webkit-scrollbar{height:6px;}
+.dash-table-scroll::-webkit-scrollbar-thumb{background:rgba(0,0,0,.25);border-radius:6px;}
+.dash-search .dash-btn,.dash-hist-row .dash-btn{flex:0 0 auto;}
+@media (max-width:980px){
+  .dash-summary{grid-template-columns:repeat(2,1fr);}
+  .dash-table{font-size:.9rem;}
+  .dash-table th,.dash-table td{padding:9px 6px;}
+  .dash-table td:nth-child(4){min-width:200px;}
+}
+@media (max-width:720px){
+  .dash-summary{grid-template-columns:1fr;}
+  .dash-search,.dash-hist-row{flex-direction:column;align-items:stretch;}
+  .dash-input,.dash-select,.dash-btn{flex:1 1 auto;max-width:100%;}
+  .dash-btn{width:100%;}
+  .dash-table{min-width:640px;}
+  .dash-legend{flex-direction:column;align-items:flex-start;gap:8px;font-size:1rem;}
+  .dash-hist-row .dash-input{flex:1 1 auto;}
+  .dash-kpi .dash-kpi-perc{font-size:1.5rem;}
+  .status-box{width:16px;height:16px;}
+}
+@media (max-width:540px){
+  .dash-table{min-width:560px;font-size:.85rem;}
+  .dash-table th,.dash-table td{padding:8px 5px;}
+  .dash-wrap{padding:0 6px;}
+  .dash-title,.dash-locked-course{text-align:center;}
+  .dash-search{gap:6px;}
+  .dash-hist-row{gap:6px;}
+  .dash-hist-banner{font-size:.85rem;}
+  .dash-btn{padding:10px 12px;}
+}
+CSS;
+$css = '<style>'.dash_minify_css($css_source).'</style>';
 
-$css .= '<style>
-.dash-title{margin:0 0 4px; font-weight:800; font-size:1.25rem;}
-.dash-locked-course{margin:0 0 12px; color:#374151; font-size:.98rem;}
+$css_titles = <<<'CSS'
+.dash-title{margin:0 0 4px;font-weight:800;font-size:1.25rem;}
+.dash-locked-course{margin:0 0 12px;color:#374151;font-size:.98rem;}
 .dash-locked-course strong{font-weight:700;}
-</style>';
+CSS;
+$css .= '<style>'.dash_minify_css($css_titles).'</style>';
 
-
-$css_extra = '<style>
+$css_extra_source = <<<'CSS'
 /* Esconde parcelas fora do mês escolhido e/ou a linha inteira quando aplicável */
-.month-dim-hide { display:none !important; }
-.month-filter-hide { display:none !important; }
+.month-dim-hide{display:none !important;}
+.month-filter-hide{display:none !important;}
 /* Datepicker em modo mês/ano (esconde os dias) */
-.ui-datepicker .ui-datepicker-calendar { display:none; }
-.ui-datepicker .ui-datepicker-current { display:none; }
-.ui-state-disabled { opacity:.45; pointer-events:none; }
-</style>';
+.ui-datepicker .ui-datepicker-calendar{display:none;}
+.ui-datepicker .ui-datepicker-current{display:none;}
+.ui-state-disabled{opacity:.45;pointer-events:none;}
+.status-separator{display:inline-block;padding:0 6px;color:var(--dash-muted);font-weight:700;}
+.status-box.signup-fee{box-shadow:inset 0 0 0 1px rgba(0,0,0,.08);}
+CSS;
+$css_extra = '<style>'.dash_minify_css($css_extra_source).'</style>';
 
 $css .= $css_extra;
 
@@ -513,7 +658,7 @@ $css .= $css_extra;
 
 
     // ===== Legenda =====
-    $legend = '<div style="display:flex;gap:14px;align-items:center;margin:4px 0 10px;flex-wrap:wrap;font-size:.9rem;color:#374151">
+    $legend = '<div class="dash-legend">
       <span><span class="status-box paid" tabindex="0" aria-label="Pago"></span> Pago</span>
       <span><span class="status-box overdue" tabindex="0" aria-label="Em atraso"></span> Em atraso</span>
       <span><span class="status-box pending" tabindex="0" aria-label="Pendente"></span> Pendente</span>
@@ -524,9 +669,16 @@ $css .= $css_extra;
     $html  = $css . $search . $legend;
 
     // ===== Tabela builder =====
-    $build_row = function(array $sub, array $payments, int $product_id) use ($agora, $hojeYmd) {
+    $build_row = function(array $sub, array $payments, int $product_id, array $meta = []) use ($agora, $hojeYmd) {
         $subscription_pk_id = (int)($sub['id'] ?? 0);
         $base_id = dash_maybe_get_parent_product_id($product_id);
+        $signup_fee_count = (int)($meta['signup_fee_count'] ?? 0);
+        $signup_fee_amount = (float)($meta['signup_fee_amount'] ?? 0);
+        if ($signup_fee_amount > 0 && $signup_fee_count === 0) {
+            $signup_fee_count = 1;
+        }
+        $signup_fee_payment = $meta['signup_fee_payment'] ?? null;
+        $signup_fee_attr = $signup_fee_amount > 0 ? number_format($signup_fee_amount, 2, '.', '') : '0.00';
 
         $totalInstallments = 6;
         $cycles = null;
@@ -548,12 +700,72 @@ $css .= $css_extra;
         }
 
         $cpf_display = $sub['cpf'] ?? ($sub['customer_cpf'] ?? '—');
-        $r  = '<tr id="sub-'.(int)$subscription_pk_id.'" data-course-id="'.esc_attr($product_id ?: 0).'" data-course-base-id="'.esc_attr($base_id ?: 0).'">';
+        $r  = '<tr id="sub-'.(int)$subscription_pk_id.'" data-course-id="'.esc_attr($product_id ?: 0).'" data-course-base-id="'.esc_attr($base_id ?: 0).'" data-signup-fee-count="'.esc_attr($signup_fee_count).'" data-signup-fee="'.esc_attr($signup_fee_attr).'">';
         $r .= '<td>'.esc_html($sub['customer_name'] ?? '—').'</td>';
         $r .= '<td>'.esc_html($sub['customer_email'] ?? '—').'</td>';
         $r .= '<td>'.esc_html($cpf_display).'</td>';
 
         $r .= '<td>';
+
+if ($signup_fee_amount > 0 || $signup_fee_count > 0) {
+    $fee_val = $signup_fee_amount > 0 ? number_format($signup_fee_amount, 2, ',', '.') : '—';
+
+    // Defaults para taxa sem linha registrada (override)
+    $cls_fee = 'pending';
+    $status_label_fee = 'Pendente';
+    $status_tip_fee = 'Taxa de inscrição — '.$status_label_fee;
+    $tooltip_fee = "Status: {$status_tip_fee}\nValor: R$ {$fee_val}\nCriação: —\nVencimento: —\nPagamento: —";
+    $created_label_fee = $venc_label_fee = $pag_label_fee = '—';
+    $due_ts_fee = 0;
+    $created_ymd_fee = $due_ymd_fee = $paid_ymd_fee = '';
+    $pay_raw_fee = '';
+
+    if (is_array($signup_fee_payment) && !empty($signup_fee_payment)) {
+        $p = $signup_fee_payment;
+        $val_raw = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : $fee_val;
+        $fee_val = $val_raw;
+
+        $cre_raw = $p['created'] ?? ($p['createdAt'] ?? '');
+        if ($cre_raw) {
+            $created_ymd_fee = date_i18n('Y-m-d', strtotime($cre_raw));
+            $created_label_fee = date_i18n('d/m/Y - H:i', strtotime($cre_raw));
+        }
+
+        $due_ts_fee  = strtotime($p['dueDate'] ?? '');
+        $orig_ts_fee = strtotime($p['originalDueDate'] ?? '');
+        $due_ts_fee  = $due_ts_fee ?: $orig_ts_fee;
+        if ($due_ts_fee) {
+            $due_ymd_fee = date_i18n('Y-m-d', $due_ts_fee);
+            $venc_label_fee = date_i18n('d/m/Y', $due_ts_fee);
+        }
+
+        $pay_raw_fee = $p['paymentDate'] ?? '';
+        if ($pay_raw_fee) {
+            $paid_ymd_fee = date_i18n('Y-m-d', strtotime($pay_raw_fee));
+            $pag_label_fee = date_i18n('d/m/Y', strtotime($pay_raw_fee));
+        }
+
+        $p_stat_fee   = strtoupper($p['paymentStatus'] ?? '');
+        $isPaidFee    = in_array($p_stat_fee, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
+        $isOverFee    = (!$isPaidFee && ($p_stat_fee === 'OVERDUE' || ($due_ymd_fee && $due_ymd_fee < $hojeYmd)));
+
+        if ($isPaidFee)       { $cls_fee='paid';    $status_label_fee='Pago'; }
+        elseif ($isOverFee)   { $cls_fee='overdue'; $status_label_fee='Em atraso'; }
+        else                  { $cls_fee='pending'; $status_label_fee='Pendente'; }
+
+        $status_tip_fee = 'Taxa de inscrição — '.$status_label_fee;
+        $tooltip_fee = "Status: {$status_tip_fee}\nValor: R$ {$fee_val}\nCriação: {$created_label_fee}\nVencimento: {$venc_label_fee}\nPagamento: {$pag_label_fee}";
+    }
+
+    $r .= '<span class="status-box signup-fee '.esc_attr($cls_fee).'"'
+        .' data-tooltip="'.esc_attr($tooltip_fee).'"'
+        .' tabindex="0" aria-label="'.esc_attr($status_tip_fee).'"'
+        .' data-date="'.esc_attr($due_ymd_fee).'" data-month="'.esc_attr($due_ts_fee ? date_i18n('Y-m', $due_ts_fee) : '').'" data-due-ymd="'.esc_attr($due_ymd_fee).'" data-created-ymd="'.esc_attr($created_ymd_fee).'" data-paid-ymd="'.esc_attr($paid_ymd_fee).'"'
+        .' data-de-criacao="'.esc_attr($created_label_fee !== '—' ? $created_label_fee : '').'" data-de-vencimento="'.esc_attr($due_ts_fee ? date_i18n('d/m/Y', $due_ts_fee) : '').'" data-de-pagamento="'.esc_attr($pay_raw_fee ? date_i18n('d/m/Y', strtotime($pay_raw_fee)) : '').'"'
+        .' data-signup-fee="'.esc_attr($fee_val).'"'
+        .'></span>';
+    $r .= '<span class="status-separator" aria-hidden="true">-</span>';
+}
 
 foreach ($installments as $p) {
     // defaults
@@ -641,13 +853,14 @@ foreach ($installments as $p) {
 
     foreach (['em_atraso'=>'Em Atraso','em_dia'=>'Em Dia','canceladas'=>'Canceladas'] as $key=>$titulo) {
         $html .= '<h3 class="dash-h3">Assinaturas — '.esc_html($titulo).'</h3>';
+        $html .= '<div class="dash-table-scroll" role="region" aria-label="Tabela '.esc_attr($titulo).'">';
         $html .= "<table id='dash-table-{$key}' class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
         if (empty($grupos[$key])) {
             $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
         } else {
-            foreach ($grupos[$key] as $entry) { $html .= $build_row($entry['sub'],$entry['payments'],(int)$entry['product_id']); }
+            foreach ($grupos[$key] as $entry) { $html .= $build_row($entry['sub'],$entry['payments'],(int)$entry['product_id'],$entry['signup_meta'] ?? []); }
         }
-        $html .= '</tbody></table>';
+        $html .= '</tbody></table></div>';
     }
 
     // ===== JS =====
@@ -667,6 +880,23 @@ ob_start();
   // Utils
   function normalize(s){ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
   function digitsOnly(s){ return String(s||'').replace(/\D+/g,''); }
+
+  function resetMonthPicker(){
+    var mon = $id('dash-month-picker');
+    if(!mon) return;
+    mon.value = '';
+    if (typeof jQuery !== 'undefined') {
+      var $mon = jQuery('#dash-month-picker');
+      if ($mon.length && $mon.data('datepicker')) {
+        $mon.datepicker('setDate', null);
+        $mon.val('');
+      }
+    }
+    mon.dispatchEvent(new Event('dash:monthChanged'));
+    mon.dispatchEvent(new Event('change'));
+    mon.dispatchEvent(new Event('input'));
+  }
+  window.dashResetMonthPicker = resetMonthPicker;
 
   function getSelectedMonth(){
     var el = $id('dash-month-picker');
@@ -770,6 +1000,18 @@ ob_start();
       var name=(courseMap[String(cid)]||'')||(courseMap[String(cbase)]||'');
       if(name){ tr.setAttribute('data-tooltip','Curso: '+name); tr.removeAttribute('title'); }
       else{ tr.removeAttribute('data-tooltip'); tr.removeAttribute('title'); }
+
+      // Evita que o tooltip da linha apareça quando o foco está na status-box
+      tr.querySelectorAll('.status-box').forEach(function(box){
+        if(box.dataset.courseTipBound==='1') return;
+        var suspend=function(){ tr.classList.add('row-tooltip-suspended'); };
+        var resume=function(){ tr.classList.remove('row-tooltip-suspended'); };
+        box.addEventListener('mouseenter', suspend);
+        box.addEventListener('mouseleave', resume);
+        box.addEventListener('focus', suspend);
+        box.addEventListener('blur', resume);
+        box.dataset.courseTipBound='1';
+      });
     });
   }
 
@@ -848,26 +1090,7 @@ ob_start();
   var inp=$id('dash-search-input'); if(inp){inp.value='';}
   var sel=$id('dash-course-filter'); if(sel){sel.value='';}
 
-  var mon=$id('dash-month-picker');
-  if(mon){
-    // 1) zera o valor do input
-    mon.value = '';
-
-    // 2) se estiver usando jQuery UI Datepicker, zera a “data selecionada” interna
-    if (typeof jQuery !== 'undefined') {
-      var $mon = jQuery('#dash-month-picker');
-      if ($mon.length && $mon.data('datepicker')) {
-        $mon.datepicker('setDate', null); // limpa seleção interna
-        $mon.val('');                     // garante que o input fique vazio
-      }
-    }
-
-    // 3) dispara os mesmos eventos que o applyFilter() já escuta
-    //    (assim o filtro de mês sai 100% do estado)
-    mon.dispatchEvent(new Event('dash:monthChanged'));
-    mon.dispatchEvent(new Event('change'));
-    mon.dispatchEvent(new Event('input'));
-  }
+  resetMonthPicker();
 
   // limpa efeitos visuais e exibe todas as linhas
   ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
@@ -991,6 +1214,27 @@ ob_start();
     var his = document.getElementById('dash-snapshot-date');
     var histOn = !!window.__dashHistActive;
 
+    // Snapshot das métricas visíveis no momento da exportação
+    var visDia = countVisibleRows('dash-table-em_dia');
+    var visAtr = countVisibleRows('dash-table-em_atraso');
+    var visCan = countVisibleRows('dash-table-canceladas');
+    var visTot = visDia + visAtr + visCan;
+    function pctSafe(part){ return visTot ? Math.round((part/visTot)*100) : 0; }
+    var pctDia = pctSafe(visDia);
+    var pctAtr = pctSafe(visAtr);
+    var pctCan = pctSafe(visCan);
+
+    var summaryTableHtml = `
+      <table>
+        <tr><th>Status</th><th>Quantidade</th><th>Percentual</th></tr>
+        <tr style="background:#0a66c2;color:#fff"><td>Total de assinaturas</td><td>${visTot}</td><td>${visTot>0?'100%':'0%'}</td></tr>
+        <tr style="background:#16a34a;color:#fff"><td>Em Dia</td><td>${visDia}</td><td>${pctDia}%</td></tr>
+        <tr style="background:#e11d48;color:#fff"><td>Em Atraso</td><td>${visAtr}</td><td>${pctAtr}%</td></tr>
+        <tr style="background:#111;color:#fff"><td>Canceladas</td><td>${visCan}</td><td>${pctCan}%</td></tr>
+      </table>
+      <br/>
+    `;
+
     // NOVO: usa o meta do curso travado se existir
     var lm = getLockedMeta();
     var selectedCourseLabel = 'Todos';
@@ -1007,8 +1251,10 @@ ob_start();
         <tr><td>Busca:</td><td colspan="2">${inp ? (inp.value || '—') : '—'}</td></tr>
         <tr><td>Mês (Criação):</td><td colspan="2">${mon ? (mon.value || '—') : '—'}</td></tr>
         <tr><td>Histórico:</td><td colspan="2">${histOn ? (his && his.value ? his.value.split('-').reverse().join('/') : 'Ativo') : 'Inativo'}</td></tr>
+        <tr><td>Assinaturas visíveis:</td><td colspan="2">${visTot}</td></tr>
       </table>
       <br/>
+      ${summaryTableHtml}
     `;
 
 
@@ -1581,26 +1827,6 @@ function initAutoHistorical(){
 (function(){
   function $id(id){ return document.getElementById(id); }
 
-  function clearMonthPickerHard(){
-    var mon = $id('dash-month-picker');
-    if (!mon) return;
-    mon.value = '';
-
-    // se jQuery UI Datepicker estiver presente, limpa o estado interno também
-    if (typeof jQuery !== 'undefined') {
-      var $mon = jQuery('#dash-month-picker');
-      if ($mon.length && $mon.data('datepicker')) {
-        $mon.datepicker('setDate', null);
-        $mon.val('');
-      }
-    }
-
-    // dispara eventos que o filtro já escuta (garante saída total do filtro de mês)
-    mon.dispatchEvent(new Event('dash:monthChanged'));
-    mon.dispatchEvent(new Event('change'));
-    mon.dispatchEvent(new Event('input'));
-  }
-
   function bindHistoryButtons(){
     var btnApply = $id('dash-snapshot-apply');
     var btnClear = $id('dash-snapshot-clear');
@@ -1638,21 +1864,24 @@ if (btnClear) {
     if (input) input.value = ''; // data do histórico
 
     // mês (inclui limpar o estado interno do jQuery UI datepicker)
-    (function clearMonthPickerHard(){
+    if (typeof window.dashResetMonthPicker === 'function') {
+      window.dashResetMonthPicker();
+    } else {
       var mon = $id('dash-month-picker');
-      if (!mon) return;
-      mon.value = '';
-      if (typeof jQuery !== 'undefined') {
-        var $mon = jQuery('#dash-month-picker');
-        if ($mon.length && $mon.data('datepicker')) {
-          $mon.datepicker('setDate', null);
-          $mon.val('');
+      if (mon) {
+        mon.value = '';
+        if (typeof jQuery !== 'undefined') {
+          var $mon = jQuery('#dash-month-picker');
+          if ($mon.length && $mon.data('datepicker')) {
+            $mon.datepicker('setDate', null);
+            $mon.val('');
+          }
         }
+        mon.dispatchEvent(new Event('dash:monthChanged'));
+        mon.dispatchEvent(new Event('change'));
+        mon.dispatchEvent(new Event('input'));
       }
-      mon.dispatchEvent(new Event('dash:monthChanged'));
-      mon.dispatchEvent(new Event('change'));
-      mon.dispatchEvent(new Event('input'));
-    })();
+    }
 
     var inp = $id('dash-search-input'); if (inp) inp.value = '';
     var sel = $id('dash-course-filter'); if (sel) sel.value = '';
@@ -1757,10 +1986,8 @@ if (btnClear) {
   }
 })();
 </script>
-
-
 <?php
-$html .= ob_get_clean();
+$html .= dash_minify_js(ob_get_clean());
 
     return $html;
 }
