@@ -2,7 +2,7 @@
 /*
 Plugin Name: Meu Plugin Dashboard Assinantes
 Description: Exibe assinaturas Asaas agrupadas por status (Em Dia, Em Atraso e Canceladas) via shortcode [dashboard_assinantes_e_pedidos]
-Version: 1.19
+Version: 1.20
 Author: Luis Furtado
 */
 
@@ -28,6 +28,285 @@ function dash_dynamic_shortcode_alias($content) {
 add_filter('the_content','dash_dynamic_shortcode_alias',9);
 add_filter('widget_text','dash_dynamic_shortcode_alias',9);
 add_filter('widget_block_content','dash_dynamic_shortcode_alias',9);
+
+/**
+ * Gate: apenas admins podem ver o dashboard.
+ */
+function dash_user_can_view_dashboard() {
+    if (!is_user_logged_in()) return false;
+    if (current_user_can('manage_options')) return true;
+    return dash_is_user_whitelisted(get_current_user_id());
+}
+
+/**
+ * URL atual (para redirect do login).
+ */
+function dash_get_current_url() {
+    $host = isset($_SERVER['HTTP_HOST']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_HOST'])) : '';
+    $uri  = isset($_SERVER['REQUEST_URI']) ? wp_unslash($_SERVER['REQUEST_URI']) : '';
+    $uri  = is_string($uri) ? preg_replace('#\s+#', '', $uri) : '';
+    if (empty($host)) {
+        return home_url();
+    }
+    $scheme = is_ssl() ? 'https://' : 'http://';
+    return esc_url_raw($scheme . $host . $uri);
+}
+
+/**
+ * Detecta se a página tem o shortcode (forma principal ou alias).
+ */
+function dash_page_has_dashboard_shortcode() {
+    if (is_admin()) return false;
+    global $post;
+    if ($post instanceof WP_Post) {
+        $content = $post->post_content ?? '';
+        if (has_shortcode($content, 'dashboard_assinantes_e_pedidos')) {
+            return true;
+        }
+        if (preg_match('/\[dashboard_assinantes_e_pedidos_\d+/i', $content)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Renderiza o bloco de login quando o usuário não pode ver o dashboard.
+ */
+function dash_render_login_prompt() {
+    $redirect = dash_get_current_url();
+    $is_logged = is_user_logged_in();
+    $status_meta = $is_logged ? dash_get_request_status_meta(get_current_user_id()) : ['status'=>'','updated'=>0];
+    $status = $status_meta['status'] ?? '';
+    $message  = $is_logged
+        ? 'Sua conta ainda não tem permissão para ver o dashboard. Solicite aprovação para continuar.'
+        : 'Informe seu usuário ou e-mail e senha para acessar o dashboard.';
+
+    $login_form = (!$is_logged && function_exists('wp_login_form'))
+        ? wp_login_form([
+            'echo'           => false,
+            'redirect'       => $redirect,
+            'remember'       => true,
+            'label_username' => 'Usuário ou e-mail',
+            'label_password' => 'Senha',
+            'label_log_in'   => 'Acessar',
+            'label_remember' => 'Lembrar de mim',
+        ])
+        : '';
+
+    $logout_link = '';
+    if ($is_logged) {
+        $logout_link = '<p class="dash-login-logout"><a href="'.esc_url(wp_logout_url($redirect)).'">Sair e trocar de usuário</a></p>';
+    }
+
+    $css = '<style>'.dash_minify_css('
+:root{--dash-primary:#0a66c2;--dash-primary-dark:#084a8f;--dash-text:#1f2937;--dash-muted:#4b5563;}
+.dash-login-embed{display:flex;justify-content:center;align-items:center;padding:56px 18px;background:linear-gradient(135deg,rgba(10,102,194,.08),rgba(17,24,39,.02));font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--dash-text);}
+.dash-login-card{width:100%;max-width:540px;background:#fff;border:1px solid #d1d5db;border-radius:16px;box-shadow:0 22px 70px rgba(10,102,194,.16);padding:28px 28px 22px;}
+.dash-login-eyebrow{display:inline-block;padding:6px 10px;margin:0 0 10px;font-size:.82rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dash-primary);background:rgba(10,102,194,.08);border-radius:999px;}
+.dash-login-card h2{margin:0 0 6px;font-size:1.45rem;font-weight:800;color:var(--dash-text);}
+.dash-login-card p{margin:0 0 14px;color:var(--dash-muted);}
+.dash-login-card form{margin-top:8px;}
+.dash-login-form form{display:flex;flex-direction:column;gap:12px;}
+.dash-login-card form p{margin:0;}
+.dash-login-card label{font-weight:700;color:var(--dash-text);margin-bottom:4px;}
+.dash-login-card input[type=text],.dash-login-card input[type=password]{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:10px;padding:10px 12px;font-size:1rem;transition:border-color .15s ease,box-shadow .15s ease;}
+.dash-login-card input[type=text]:focus,.dash-login-card input[type=password]:focus{border-color:var(--dash-primary);box-shadow:0 0 0 3px rgba(10,102,194,.18);outline:none;}
+.dash-login-card .login-remember{display:flex;align-items:center;gap:8px;font-size:.95rem;color:var(--dash-text);}
+.dash-login-card .login-remember label{display:flex;align-items:center;gap:8px;margin:0;font-weight:600;}
+.dash-login-card .login-submit{margin-top:2px;}
+.dash-login-card .login-submit .button-primary{width:100%;background:var(--dash-primary);border:1px solid var(--dash-primary);border-radius:10px;padding:11px 12px;font-size:1rem;font-weight:700;box-shadow:0 10px 24px rgba(10,102,194,.18);transition:transform .14s ease,box-shadow .14s ease,background .14s ease;}
+.dash-login-card .login-submit .button-primary:hover{background:var(--dash-primary-dark);border-color:var(--dash-primary-dark);transform:translateY(-1px);box-shadow:0 16px 32px rgba(8,74,143,.2);}
+.dash-login-card .login-submit .button-primary:focus{outline:none;box-shadow:0 0 0 3px rgba(10,102,194,.3);}
+.dash-request-block{margin-top:16px;padding:16px 14px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;box-shadow:inset 0 1px 0 rgba(255,255,255,.8);}
+.dash-request-block h3{margin:0 0 6px;font-size:1.05rem;color:var(--dash-text);}
+.dash-request-hint{margin:0 0 10px;color:var(--dash-muted);}
+.dash-request-status{font-weight:700;margin:0 0 8px;color:var(--dash-primary);}
+.dash-request-sent{margin:0 0 8px;color:var(--dash-muted);font-weight:600;}
+.dash-request-form{display:flex;flex-direction:column;gap:10px;}
+.dash-request-form label{font-weight:700;color:var(--dash-text);}
+.dash-request-form input[type=text]{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;transition:border-color .15s ease,box-shadow .15s ease;}
+.dash-request-form input[type=text]:focus{border-color:var(--dash-primary);box-shadow:0 0 0 3px rgba(10,102,194,.18);outline:none;}
+.dash-request-form .button-primary{align-self:flex-start;background:var(--dash-primary);border:1px solid var(--dash-primary);color:#fff;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer;transition:transform .14s ease,box-shadow .14s ease,background .14s ease;}
+.dash-request-form .button-primary:hover{background:var(--dash-primary-dark);border-color:var(--dash-primary-dark);transform:translateY(-1px);box-shadow:0 12px 26px rgba(10,102,194,.18);}
+.dash-login-logout{margin-top:14px;text-align:center;}
+.dash-login-logout a{color:var(--dash-primary);font-weight:700;text-decoration:none;}
+.dash-login-logout a:hover{text-decoration:underline;}
+@media (max-width:560px){
+  .dash-login-card{padding:22px 18px;}
+  .dash-login-card h2{font-size:1.3rem;}
+}
+    ').'</style>';
+
+    $status_msg = '';
+    if ($status === 'pending') {
+        $status_msg = '<p class="dash-request-status">Solicitação pendente de aprovação.</p>';
+    } elseif ($status === 'rejected') {
+        $status_msg = '<p class="dash-request-status">Solicitação recusada. Você pode enviar uma nova solicitação.</p>';
+    }
+
+    $request_form = '';
+    $status_nonce = $is_logged ? wp_create_nonce('dash_status_check') : '';
+
+    if ($is_logged) {
+        $u = wp_get_current_user();
+        $prefill = $u ? $u->display_name : '';
+        $action = esc_url(admin_url('admin-post.php'));
+        $request_form = '
+            <div class="dash-request-block" data-dash-status="'.esc_attr($status).'">
+              <h3>Solicite aprovação para ver o dashboard</h3>
+              <p class="dash-request-hint">Já estamos logados com sua conta. Envie seu nome para liberar o acesso.</p>
+              '.$status_msg.'
+              <div class="dash-request-sent" '.($status === 'pending' ? '' : 'style="display:none"').'>Solicitação enviada. Aguarde a aprovação do administrador.</div>
+              <form class="dash-request-form" method="post" action="'.$action.'" data-dash-request="1" '.($status === 'pending' ? 'style="display:none"' : '').'>
+                <input type="hidden" name="action" value="dash_request_access">
+                '.wp_nonce_field('dash_request_access', '_dashreq', true, false).'
+                <label for="dash-request-name">Nome completo</label>
+                <input type="text" name="dash_request_name" id="dash-request-name" value="'.esc_attr($prefill).'" required>
+                <button type="submit" class="button button-primary">'.($status === 'rejected' ? 'Enviar nova solicitação' : 'Enviar solicitação').'</button>
+              </form>
+            </div>';
+    }
+
+    $login_block = $login_form ? '<div class="dash-login-form">'.$login_form.'</div>' : '';
+
+    $poll_js = '';
+    if ($is_logged) {
+        $ajax = esc_url(admin_url('admin-ajax.php'));
+        $poll_js = '
+        <script>
+        (function(){
+          var blk = document.querySelector(".dash-request-block");
+          if(!blk) return;
+          var form = blk.querySelector(".dash-request-form");
+          var sent = blk.querySelector(".dash-request-sent");
+          var statusLabel = blk.querySelector(".dash-request-status");
+          var current = blk.getAttribute("data-dash-status") || "";
+
+          function apply(state){
+            current = state;
+            blk.setAttribute("data-dash-status", state);
+            if(state === "approved"){
+              if(statusLabel){ statusLabel.textContent = "Solicitação aprovada! Abrindo dashboard..."; statusLabel.style.display = ""; }
+              if(sent){ sent.style.display = ""; sent.textContent = "Solicitação aprovada!"; }
+              if(form){ form.style.display = "none"; }
+              setTimeout(function(){ window.location.reload(); }, 800);
+              return;
+            }
+            if(state === "pending"){
+              if(statusLabel){ statusLabel.textContent = "Solicitação pendente de aprovação."; statusLabel.style.display = ""; }
+              if(sent){ sent.style.display = ""; sent.textContent = "Solicitação enviada. Aguarde a aprovação do administrador."; }
+              if(form){ form.style.display = "none"; }
+              return;
+            }
+            if(state === "rejected"){
+              if(statusLabel){ statusLabel.textContent = "Solicitação recusada. Você pode enviar novamente."; statusLabel.style.display = ""; }
+              if(sent){ sent.style.display = "none"; }
+              if(form){ form.style.display = ""; }
+              return;
+            }
+            if(form){ form.style.display = ""; }
+            if(sent){ sent.style.display = "none"; }
+          }
+
+          function poll(){
+            var fd = new FormData();
+            fd.append("action","dash_request_status");
+            fd.append("_dashnonce","'.esc_js($status_nonce).'");
+            fetch("'.$ajax.'",{method:"POST",credentials:"same-origin",body:fd})
+              .then(function(r){ return r.json(); })
+              .then(function(res){
+                if(!res || !res.success || !res.data) return;
+                if(res.data.status && res.data.status !== current){
+                  apply(res.data.status);
+                }
+              })
+              .catch(function(){});
+          }
+
+          if(form){
+            form.addEventListener("submit", function(ev){
+              ev.preventDefault();
+              var btn = form.querySelector("button[type=\"submit\"]");
+              var btnTxt = btn ? btn.textContent : "";
+              if(btn){ btn.disabled = true; btn.textContent = "Enviando..."; }
+              var fd = new FormData(form);
+              fd.set("action","dash_request_access_ajax");
+              fetch("'.$ajax.'",{method:"POST",credentials:"same-origin",body:fd})
+                .then(function(r){ return r.json(); })
+                .then(function(res){
+                  if(res && res.success && res.data){
+                    if(res.data.status){ apply(res.data.status); }
+                    if(res.data.message && statusLabel){ statusLabel.textContent = res.data.message; statusLabel.style.display = ""; }
+                  } else {
+                    form.submit();
+                  }
+                })
+                .catch(function(){ form.submit(); })
+                .finally(function(){ if(btn){ btn.disabled = false; btn.textContent = btnTxt; } });
+            });
+          }
+
+          if(current){ apply(current); }
+          setInterval(poll, 8000);
+        })();
+        </script>';
+    }
+
+    return $css.'<div class="login dash-login-embed"><div class="dash-login-card"><span class="dash-login-eyebrow">Dashboard de assinaturas</span><h2>Acesso restrito</h2><p>'.$message.'</p>'.$login_block.$request_form.$logout_link.'</div></div>'.$poll_js;
+}
+
+/**
+ * Processa solicitação de acesso (usuário não-admin).
+ */
+function dash_handle_request_access() {
+    $redirect = dash_get_current_url();
+    if (!is_user_logged_in()) {
+        wp_safe_redirect(wp_login_url($redirect));
+        exit;
+    }
+    if (!isset($_POST['_dashreq']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_dashreq'])), 'dash_request_access')) {
+        wp_safe_redirect(add_query_arg('dash_req','fail',$redirect));
+        exit;
+    }
+    $uid = get_current_user_id();
+    if (current_user_can('manage_options') || dash_is_user_whitelisted($uid)) {
+        wp_safe_redirect(add_query_arg('dash_req','approved',$redirect));
+        exit;
+    }
+    $name = isset($_POST['dash_request_name']) ? wp_unslash($_POST['dash_request_name']) : '';
+    dash_add_pending_request($uid, $name);
+    dash_set_request_status_meta($uid, 'pending');
+    wp_safe_redirect(add_query_arg('dash_req','sent',$redirect));
+    exit;
+}
+add_action('admin_post_dash_request_access','dash_handle_request_access');
+add_action('admin_post_nopriv_dash_request_access','dash_handle_request_access');
+
+/**
+ * Processa decisão de acesso (admin).
+ */
+function dash_handle_decide_access() {
+    if (!current_user_can('manage_options')) {
+        wp_die('Acesso negado');
+    }
+    if (!isset($_POST['_dashdec']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_dashdec'])), 'dash_decide_access')) {
+        wp_die('Nonce inválido');
+    }
+    $uid = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
+    $decision = isset($_POST['decision']) ? sanitize_text_field(wp_unslash($_POST['decision'])) : '';
+    if ($uid > 0) {
+        if ($decision === 'approve') {
+            dash_approve_request($uid);
+        } elseif ($decision === 'reject') {
+            dash_reject_request($uid);
+        }
+    }
+    $back = wp_get_referer() ?: home_url();
+    wp_safe_redirect(add_query_arg('dash_req','done',$back));
+    exit;
+}
+add_action('admin_post_dash_decide_access','dash_handle_decide_access');
 
 /**
  * =============================================================
@@ -371,135 +650,164 @@ function dash_minify_js($js) {
 }
 
 /**
- * =============================================================
- * 3) Renderização do Dashboard
- * =============================================================
+ * Acesso extra: whitelist e solicitações.
  */
-function mostrar_dashboard_assinantes($atts = []) {
-    $atts = shortcode_atts(['id'=>0,'corseid'=>0], $atts, 'dashboard_assinantes_e_pedidos');
-    $raw = $atts['corseid'] ?: $atts['id'];
-    if (is_string($raw) && preg_match('/^\s*(\d+)/',$raw,$m)) $raw = $m[1];
-
-    $filter_id = absint($raw);
-    $filter_base_id = $filter_id ? dash_maybe_get_parent_product_id($filter_id) : 0;
-
-    $locked_by_id = $filter_id > 0;
-    $locked_course_name = '';
-    if ($locked_by_id) {
-        $locked_course_name = dash_get_product_name($filter_base_id ?: $filter_id);
+function dash_get_whitelist() {
+    $list = get_option('dash_access_whitelist');
+    return is_array($list) ? $list : [];
+}
+function dash_is_user_whitelisted($user_id) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return false;
+    $list = dash_get_whitelist();
+    return !empty($list[$user_id]);
+}
+function dash_add_to_whitelist($user_id) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return;
+    $list = dash_get_whitelist();
+    $list[$user_id] = true;
+    update_option('dash_access_whitelist', $list, false);
+}
+function dash_remove_from_whitelist($user_id) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return;
+    $list = dash_get_whitelist();
+    if (isset($list[$user_id])) {
+        unset($list[$user_id]);
+        update_option('dash_access_whitelist', $list, false);
     }
-
-
-    $subs = dash_fetch_all_asaas_subscriptions();
-    $agora = current_time('timestamp');
-    $hojeYmd = date_i18n('Y-m-d',$agora);
-
-    $subscription_table_ids = [];
-    $subscriptionIDs = [];
-    foreach ($subs as $s) {
-        $subscription_table_ids[] = (int)($s['id'] ?? 0);
-        $subscriptionIDs[] = (string)($s['subscriptionID'] ?? '');
-    }
-
-    $pid_map = dash_get_product_map_for_subscriptions($subscription_table_ids);
-    $pay_map = dash_fetch_payments_map(array_filter($subscriptionIDs));
-
-    // Lista única de IDs de cursos para o <select>
-    $course_ids_set = [];
-    if (!empty($pid_map)) {
-        foreach ($pid_map as $__sub_table_id => $__pid) { $__pid = (int)$__pid; if ($__pid > 0) { $course_ids_set[$__pid] = true; } }
-    }
-    $course_ids_unique = array_keys($course_ids_set);
-    sort($course_ids_unique, SORT_NUMERIC);
-
-    $name_cache = [];
-    $course_options = '<option value="">Todos</option>';
-    foreach ($course_ids_unique as $__cid) {
-        $display_id = dash_maybe_get_parent_product_id($__cid);
-        if (!isset($name_cache[$display_id])) {
-            $name = '';
-            if (function_exists('wc_get_product')) { $p = wc_get_product($display_id); if ($p) { $name = $p->get_name(); } }
-            if (!$name) { $name = get_post_field('post_title',$display_id); }
-            if (!$name) { $name = 'Produto #'. $__cid; }
-            $name_cache[$display_id] = $name;
+}
+function dash_get_pending_requests() {
+    $req = get_option('dash_access_requests');
+    return is_array($req) ? $req : [];
+}
+function dash_save_pending_requests(array $reqs) {
+    update_option('dash_access_requests', $reqs, false);
+}
+function dash_set_request_status_meta($user_id, $status) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return;
+    update_user_meta($user_id, 'dash_request_status', $status);
+    update_user_meta($user_id, 'dash_request_updated', time());
+}
+function dash_get_request_status_meta($user_id) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return ['status'=>'', 'updated'=>0];
+    return [
+        'status'  => (string)get_user_meta($user_id, 'dash_request_status', true),
+        'updated' => (int)get_user_meta($user_id, 'dash_request_updated', true),
+    ];
+}
+function dash_add_pending_request($user_id, $name) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return;
+    $pending = dash_get_pending_requests();
+    foreach ($pending as $p) {
+        if ((int)($p['user_id'] ?? 0) === $user_id) {
+            return;
         }
-        $course_options .= '<option value="'.esc_attr($__cid).'">'.esc_html($name_cache[$display_id]).'</option>';
+    }
+    $u = get_userdata($user_id);
+    $pending[] = [
+        'user_id' => $user_id,
+        'name'    => sanitize_text_field($name ?: ($u ? $u->display_name : '')),
+        'login'   => $u ? $u->user_login : '',
+        'email'   => $u ? $u->user_email : '',
+        'time'    => time(),
+    ];
+    dash_save_pending_requests($pending);
+}
+function dash_approve_request($user_id) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return;
+    $pending = dash_get_pending_requests();
+    $pending = array_values(array_filter($pending, function($r) use ($user_id){ return (int)($r['user_id'] ?? 0) !== $user_id; }));
+    dash_save_pending_requests($pending);
+    dash_add_to_whitelist($user_id);
+    dash_set_request_status_meta($user_id, 'approved');
+}
+function dash_reject_request($user_id) {
+    $user_id = (int)$user_id;
+    if (!$user_id) return;
+    $pending = dash_get_pending_requests();
+    $pending = array_values(array_filter($pending, function($r) use ($user_id){ return (int)($r['user_id'] ?? 0) !== $user_id; }));
+    dash_save_pending_requests($pending);
+    dash_remove_from_whitelist($user_id);
+    dash_set_request_status_meta($user_id, 'rejected');
+}
+
+/**
+ * AJAX: retorna status da solicitação de acesso para o usuário logado.
+ */
+function dash_ajax_request_status() {
+    if (!is_user_logged_in()) {
+        wp_send_json_error(['message'=>'auth']);
+    }
+    if (!isset($_POST['_dashnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_dashnonce'])), 'dash_status_check')) {
+        wp_send_json_error(['message'=>'nonce']);
+    }
+    $uid = get_current_user_id();
+    $meta = dash_get_request_status_meta($uid);
+    $status = $meta['status'] ?? '';
+    wp_send_json_success(['status' => $status]);
+}
+add_action('wp_ajax_dash_request_status','dash_ajax_request_status');
+add_action('wp_ajax_nopriv_dash_request_status', function(){ wp_send_json_error(['message'=>'auth']); });
+
+/**
+ * AJAX: cria/atualiza solicitação de acesso sem redirecionar.
+ */
+function dash_ajax_request_access() {
+    if (!is_user_logged_in()) {
+        wp_send_json_error(['message'=>'auth']);
+    }
+    if (!isset($_POST['_dashreq']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_dashreq'])), 'dash_request_access')) {
+        wp_send_json_error(['message'=>'nonce']);
+    }
+    $uid = get_current_user_id();
+    if (current_user_can('manage_options') || dash_is_user_whitelisted($uid)) {
+        dash_set_request_status_meta($uid, 'approved');
+        wp_send_json_success(['status'=>'approved','message'=>'Solicitação aprovada!']);
     }
 
-    $course_select_html = '';
-    if ($locked_by_id) {
-        $course_select_html = '';
-    } else {
-        $course_select_html = '<select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'
-                            . $course_options
-                            . '</select>';
-    }
+    $name = isset($_POST['dash_request_name']) ? wp_unslash($_POST['dash_request_name']) : '';
+    dash_add_pending_request($uid, $name);
+    dash_set_request_status_meta($uid, 'pending');
+    wp_send_json_success(['status'=>'pending','message'=>'Solicitação enviada. Aguarde a aprovação do administrador.']);
+}
+add_action('wp_ajax_dash_request_access_ajax','dash_ajax_request_access');
 
-    $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
-    $overdueStatuses = ['OVERDUE'];
-    $mapPaid = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
+/**
+ * Registro básico de assets (handles).
+ */
+function dash_register_assets() {
+    static $registered = false;
+    if ($registered) return;
 
-    $grupos = ['em_dia'=>[],'em_atraso'=>[],'canceladas'=>[]];
+    $ver = '1.20';
+    wp_register_style('dash-colab-dashboard', false, [], $ver);
+    wp_register_script('dash-colab-dashboard', false, ['jquery'], $ver, true);
 
-    foreach ($subs as $sub) {
-        $subscription_pk_id = (int)($sub['id'] ?? 0);
-        $subscriptionID = (string)($sub['subscriptionID'] ?? '');
-        $pid_for_select = (int)($pid_map[$subscription_pk_id] ?? 0);
-        $has_payments_entry = array_key_exists($subscriptionID, $pay_map);
-        $payments_raw = array_values($pay_map[$subscriptionID] ?? []);
-        $signup_fee_amount = dash_get_subscription_signup_fee($pid_for_select);
-        $split_payments = dash_filter_signup_fee_payments($payments_raw, $signup_fee_amount);
-        $payments = array_values($split_payments['payments']);
-        $signup_fees = array_values($split_payments['fees']);
-        $signup_fee_count = count($signup_fees);
-        $signup_fee_payment = $signup_fees ? $signup_fees[0] : null; // pega a 1ª taxa (se houver)
-        if ($signup_fee_amount > 0 && $signup_fee_count === 0) {
-            // Garante exibição do box mesmo que ainda não haja linha de pagamento marcada como taxa
-            $signup_fee_count = 1;
-        }
+    // CSS do login do WordPress para reaproveitar o visual padrão.
+    wp_register_style('dash-colab-login', includes_url('css/login.min.css'), [], get_bloginfo('version'));
 
-        if ($filter_id) {
-            $pid_base = dash_maybe_get_parent_product_id($pid_for_select);
-            if ((int)$pid_for_select !== (int)$filter_id && (int)$pid_base !== (int)$filter_base_id) continue;
-        }
+    $registered = true;
+}
 
-        $stat_raw = strtoupper(trim($sub['status'] ?? ''));
-        if ($has_payments_entry && empty($payments) && empty($signup_fees) && $signup_fee_amount <= 0) continue;
+/**
+ * Enfileira CSS do login incorporado.
+ */
+function dash_enqueue_login_assets() {
+    dash_register_assets();
+    wp_enqueue_style('dash-colab-login');
+}
 
-        if (in_array($stat_raw,$expiredStatuses,true)) {
-            $grupos['canceladas'][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select,'signup_meta'=>['signup_fee_amount'=>$signup_fee_amount,'signup_fee_count'=>$signup_fee_count,'signup_fee_payment'=>$signup_fee_payment]];
-            continue;
-        }
-
-        $hasOverdue = in_array($stat_raw,$overdueStatuses,true);
-        if (!$hasOverdue && $payments) {
-            foreach ($payments as $p) {
-                $p_stat = strtoupper($p['paymentStatus'] ?? '');
-                $due_ts  = strtotime($p['dueDate'] ?? '');
-                $orig_ts = strtotime($p['originalDueDate'] ?? '');
-                $venc_ts = $due_ts ?: $orig_ts;
-                $dueYmd = $venc_ts ? date_i18n('Y-m-d',$venc_ts) : null;
-                $isPaid = in_array($p_stat,$mapPaid,true);
-                if (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd))) { $hasOverdue = true; break; }
-            }
-        }
-
-        $key = $hasOverdue ? 'em_atraso' : 'em_dia';
-        $grupos[$key][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select,'signup_meta'=>['signup_fee_amount'=>$signup_fee_amount,'signup_fee_count'=>$signup_fee_count,'signup_fee_payment'=>$signup_fee_payment]];
-    }
-
-    $cnt_dia = count($grupos['em_dia']);
-    $cnt_atraso = count($grupos['em_atraso']);
-    $cnt_canceladas = count($grupos['canceladas']);
-    $cnt_total = $cnt_dia + $cnt_atraso + $cnt_canceladas;
-
-    $pct_total = $cnt_total > 0 ? 100 : 0;
-    $pct_dia = $cnt_total > 0 ? round(($cnt_dia / $cnt_total) * 100) : 0;
-    $pct_atraso = $cnt_total > 0 ? round(($cnt_atraso / $cnt_total) * 100) : 0;
-    $pct_canceladas = $cnt_total > 0 ? round(($cnt_canceladas / $cnt_total) * 100) : 0;
-
-// ===== CSS =====
-$css_source = <<<'CSS'
+/**
+ * Constrói (sem <style>) todo o CSS do dashboard, mantendo o conteúdo original.
+ */
+function dash_build_dashboard_css() {
+    $css_source = <<<'CSS'
 :root{--dash-primary:#0a66c2;--dash-primary-dark:#084a8f;--dash-text:#1f2937;--dash-muted:#6b7280;--dash-border:#e5e7eb;--paid:#16a34a;--overdue:#e11d48;--pending:#f59e0b;--future:#e5e7eb;--box-border:rgba(0,0,0,.35);}
 .dash-wrap{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";color:var(--dash-text);}
 .dash-h3{margin:24px 0 8px;font-size:1.125rem;font-weight:700;}
@@ -591,16 +899,16 @@ $css_source = <<<'CSS'
   .dash-btn{padding:10px 12px;}
 }
 CSS;
-$css = '<style>'.dash_minify_css($css_source).'</style>';
+    $css = dash_minify_css($css_source);
 
-$css_titles = <<<'CSS'
+    $css_titles = <<<'CSS'
 .dash-title{margin:0 0 4px;font-weight:800;font-size:1.25rem;}
 .dash-locked-course{margin:0 0 12px;color:#374151;font-size:.98rem;}
 .dash-locked-course strong{font-weight:700;}
 CSS;
-$css .= '<style>'.dash_minify_css($css_titles).'</style>';
+    $css .= "\n" . dash_minify_css($css_titles);
 
-$css_extra_source = <<<'CSS'
+    $css_extra_source = <<<'CSS'
 /* Esconde parcelas fora do mês escolhido e/ou a linha inteira quando aplicável */
 .month-dim-hide{display:none !important;}
 .month-filter-hide{display:none !important;}
@@ -610,263 +918,45 @@ $css_extra_source = <<<'CSS'
 .ui-state-disabled{opacity:.45;pointer-events:none;}
 .status-separator{display:inline-block;padding:0 6px;color:var(--dash-muted);font-weight:700;}
 .status-box.signup-fee{box-shadow:inset 0 0 0 1px rgba(0,0,0,.08);}
+.dash-requests{margin:0 0 16px;padding:14px 12px;border:1px solid #e5e7eb;border-radius:12px;background:linear-gradient(135deg,rgba(10,102,194,.08),#fff);box-shadow:0 10px 26px rgba(0,0,0,.08);}
+.dash-requests h3{margin:0 0 10px;font-size:1.05rem;}
+.dash-request-card{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 8px;border-top:1px solid #e5e7eb;}
+.dash-request-card:first-of-type{border-top:0;padding-top:0;}
+.dash-request-meta{font-size:.95rem;}
+.dash-request-meta strong{display:block;font-size:1rem;}
+.dash-request-actions form{display:inline-block;margin-left:6px;}
+.dash-request-actions button{cursor:pointer;}
+.dash-request-actions .button-primary{background:var(--dash-primary);border-color:var(--dash-primary);color:#fff;}
+.dash-request-actions .button-primary:hover{background:var(--dash-primary-dark);border-color:var(--dash-primary-dark);}
+.dash-user-icon-wrap{display:flex;align-items:center;gap:8px;margin:0 0 8px;}
+.dash-user-icon{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:12px;background:rgba(10,102,194,.12);border:1px solid rgba(10,102,194,.22);box-shadow:0 6px 18px rgba(0,0,0,.08);cursor:pointer;color:var(--dash-primary);font-weight:800;}
+.dash-user-icon span{font-size:18px;line-height:1;}
+.dash-accepted{position:relative;display:inline-block;}
+.dash-accepted details{position:relative;}
+.dash-accepted summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #d1d5db;border-radius:12px;background:#fff;box-shadow:0 8px 20px rgba(0,0,0,.08);font-weight:700;color:var(--dash-text);}
+.dash-accepted summary::-webkit-details-marker{display:none;}
+.dash-accepted summary:hover{border-color:var(--dash-primary);color:var(--dash-primary);}
+.dash-accepted-list{position:absolute;z-index:50;top:46px;right:0;min-width:280px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,.14);padding:12px;max-height:360px;overflow:auto;}
+.dash-accepted-list h4{margin:0 0 8px;font-size:1rem;}
+.dash-accepted-close{position:absolute;top:8px;right:8px;border:0;background:transparent;color:#6b7280;font-size:18px;font-weight:800;cursor:pointer;line-height:1;border-radius:6px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;}
+.dash-accepted-close:hover{color:var(--dash-primary);background:rgba(10,102,194,.08);}
+.dash-accepted-item{border-top:1px solid #e5e7eb;padding:10px 0;}
+.dash-accepted-item:first-of-type{border-top:0;padding-top:0;}
+.dash-accepted-item strong{display:block;}
+.dash-accepted-item small{color:#4b5563;}
+.dash-accepted-item form{margin-top:8px;}
 CSS;
-$css_extra = '<style>'.dash_minify_css($css_extra_source).'</style>';
+    $css .= "\n" . dash_minify_css($css_extra_source);
 
-$css .= $css_extra;
-
-    $heading  = '<div class="dash-wrap">';
-    $heading .= '<h2 class="dash-title">Dashboard de assinaturas</h2>';
-    if ($locked_by_id) {
-        $heading .= '<div class="dash-locked-course">Curso: <strong>'.esc_html($locked_course_name).'</strong></div>';
-        $locked_meta = $locked_by_id
-          ? '<div id="dash-locked-meta" data-locked="1" data-course-id="'.esc_attr($filter_id).'" data-course-base-id="'.esc_attr($filter_base_id ?: $filter_id).'" data-course-name="'.esc_attr($locked_course_name).'"></div>'
-          : '<div id="dash-locked-meta" data-locked="0"></div>';
-        $heading .= $locked_meta;
-
-    }
-    $heading .= '</div>';
-
-    // ===== RESUMO =====
-    $summary = $heading . '<div class="dash-summary" role="region" aria-label="Resumo das assinaturas"><div class="dash-kpi total" role="status" aria-live="polite"><div class="dash-kpi-label">Assinaturas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span><small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div></div><div class="dash-kpi emdia" role="status" aria-live="polite"><div class="dash-kpi-label">Em Dia</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span><small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div></div><div class="dash-kpi atraso" role="status" aria-live="polite"><div class="dash-kpi-label">Em Atraso</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span><small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div></div><div class="dash-kpi cancel" role="status" aria-live="polite"><div class="dash-kpi-label">Canceladas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span><small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div></div></div><div class="dash-composition" aria-label="Composição por status (visível)"><div class="dash-stacked"><span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span><span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span><span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span></div><div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div></div><div class="dash-summary-note" id="dash-summary-note">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
-
-    // ===== Barra de busca + Histórico =====
-    $search = '<div class="dash-wrap">'.$summary.'
-    <!-- 1ª linha: filtros normais -->
-    <div class="dash-search" role="search" aria-label="Filtrar assinantes">
-      '.$course_select_html.'
-      <input type="text" id="dash-month-picker" class="dash-input dash-select" placeholder="Selecionar mês/ano" aria-label="Selecionar mês e ano" readonly>
-      <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
-      <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
-      <button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button>
-
-      <!-- baixar csv -->
-      <button type="button" id="dash-export-xls-btn" class="dash-btn" aria-label="Baixar relatório XLS">Baixar relatório (XLS)</button>
-    </div>
-
-    <!-- 2ª linha: controles do modo histórico -->
-    <div class="dash-hist-row" role="group" aria-label="Histórico">
-      <input type="date" id="dash-snapshot-date" class="dash-input dash-select" aria-label="Data de referência (histórico)" placeholder="AAAA-MM-DD">
-      <button type="button" id="dash-snapshot-apply" class="dash-btn" aria-label="Aplicar histórico">Histórico</button>
-      <button type="button" id="dash-snapshot-clear" class="dash-btn" aria-label="Sair do histórico">Sair do histórico</button>
-    </div>
-
-    <!-- Banner do histórico -->
-    <div id="dash-hist-banner" class="dash-hist-banner" style="display:none" role="status" aria-live="polite">
-      Modo histórico ativo em <strong id="dash-hist-date-label"></strong>. Os filtros normais ficam temporariamente ignorados.
-      </div>';
-
-
-    // ===== Legenda =====
-    $legend = '<div class="dash-legend">
-      <span><span class="status-box paid" tabindex="0" aria-label="Pago"></span> Pago</span>
-      <span><span class="status-box overdue" tabindex="0" aria-label="Em atraso"></span> Em atraso</span>
-      <span><span class="status-box pending" tabindex="0" aria-label="Pendente"></span> Pendente</span>
-      <span><span class="status-box future" tabindex="0" aria-label="Não criada"></span> Não criada</span>
-    </div>';
-
-    // Inicia HTML
-    $html  = $css . $search . $legend;
-
-    // ===== Tabela builder =====
-    $build_row = function(array $sub, array $payments, int $product_id, array $meta = []) use ($agora, $hojeYmd) {
-        $subscription_pk_id = (int)($sub['id'] ?? 0);
-        $base_id = dash_maybe_get_parent_product_id($product_id);
-        $signup_fee_count = (int)($meta['signup_fee_count'] ?? 0);
-        $signup_fee_amount = (float)($meta['signup_fee_amount'] ?? 0);
-        if ($signup_fee_amount > 0 && $signup_fee_count === 0) {
-            $signup_fee_count = 1;
-        }
-        $signup_fee_payment = $meta['signup_fee_payment'] ?? null;
-        $signup_fee_attr = $signup_fee_amount > 0 ? number_format($signup_fee_amount, 2, '.', '') : '0.00';
-
-        $totalInstallments = 6;
-        $cycles = null;
-        if ($product_id) {
-            $cycles = dash_get_subscription_cycles_from_product($product_id);
-            if ($cycles !== null) $totalInstallments = ($cycles > 0) ? (int)$cycles : max(count($payments),6);
-        }
-        if ((!$product_id || $cycles === null) && !empty($sub['order_id'])) {
-            $maybe_cycles = dash_get_cycles_from_wc_subscription_order($sub['order_id']);
-            if ($maybe_cycles !== null) $totalInstallments = ($maybe_cycles > 0) ? (int)$maybe_cycles : max(count($payments),6);
-        }
-        if (count($payments) > $totalInstallments) $totalInstallments = count($payments);
-
-        $installments = array_fill(0,$totalInstallments,null);
-        foreach ($payments as $p) {
-            $idx = (isset($p['installmentNumber']) && is_numeric($p['installmentNumber'])) ? ((int)$p['installmentNumber'] - 1) : null;
-            if ($idx === null || $idx < 0 || $idx >= $totalInstallments) $idx = array_search(null,$installments,true);
-            if ($idx !== false) $installments[$idx] = $p;
-        }
-
-        $cpf_display = $sub['cpf'] ?? ($sub['customer_cpf'] ?? '—');
-        $r  = '<tr id="sub-'.(int)$subscription_pk_id.'" data-course-id="'.esc_attr($product_id ?: 0).'" data-course-base-id="'.esc_attr($base_id ?: 0).'" data-signup-fee-count="'.esc_attr($signup_fee_count).'" data-signup-fee="'.esc_attr($signup_fee_attr).'">';
-        $r .= '<td>'.esc_html($sub['customer_name'] ?? '—').'</td>';
-        $r .= '<td>'.esc_html($sub['customer_email'] ?? '—').'</td>';
-        $r .= '<td>'.esc_html($cpf_display).'</td>';
-
-        $r .= '<td>';
-
-if ($signup_fee_amount > 0 || $signup_fee_count > 0) {
-    $fee_val = $signup_fee_amount > 0 ? number_format($signup_fee_amount, 2, ',', '.') : '—';
-
-    // Defaults para taxa sem linha registrada (override)
-    $cls_fee = 'pending';
-    $status_label_fee = 'Pendente';
-    $status_tip_fee = 'Taxa de inscrição — '.$status_label_fee;
-    $tooltip_fee = "Status: {$status_tip_fee}\nValor: R$ {$fee_val}\nCriação: —\nVencimento: —\nPagamento: —";
-    $created_label_fee = $venc_label_fee = $pag_label_fee = '—';
-    $due_ts_fee = 0;
-    $created_ymd_fee = $due_ymd_fee = $paid_ymd_fee = '';
-    $pay_raw_fee = '';
-
-    if (is_array($signup_fee_payment) && !empty($signup_fee_payment)) {
-        $p = $signup_fee_payment;
-        $val_raw = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : $fee_val;
-        $fee_val = $val_raw;
-
-        $cre_raw = $p['created'] ?? ($p['createdAt'] ?? '');
-        if ($cre_raw) {
-            $created_ymd_fee = date_i18n('Y-m-d', strtotime($cre_raw));
-            $created_label_fee = date_i18n('d/m/Y - H:i', strtotime($cre_raw));
-        }
-
-        $due_ts_fee  = strtotime($p['dueDate'] ?? '');
-        $orig_ts_fee = strtotime($p['originalDueDate'] ?? '');
-        $due_ts_fee  = $due_ts_fee ?: $orig_ts_fee;
-        if ($due_ts_fee) {
-            $due_ymd_fee = date_i18n('Y-m-d', $due_ts_fee);
-            $venc_label_fee = date_i18n('d/m/Y', $due_ts_fee);
-        }
-
-        $pay_raw_fee = $p['paymentDate'] ?? '';
-        if ($pay_raw_fee) {
-            $paid_ymd_fee = date_i18n('Y-m-d', strtotime($pay_raw_fee));
-            $pag_label_fee = date_i18n('d/m/Y', strtotime($pay_raw_fee));
-        }
-
-        $p_stat_fee   = strtoupper($p['paymentStatus'] ?? '');
-        $isPaidFee    = in_array($p_stat_fee, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
-        $isOverFee    = (!$isPaidFee && ($p_stat_fee === 'OVERDUE' || ($due_ymd_fee && $due_ymd_fee < $hojeYmd)));
-
-        if ($isPaidFee)       { $cls_fee='paid';    $status_label_fee='Pago'; }
-        elseif ($isOverFee)   { $cls_fee='overdue'; $status_label_fee='Em atraso'; }
-        else                  { $cls_fee='pending'; $status_label_fee='Pendente'; }
-
-        $status_tip_fee = 'Taxa de inscrição — '.$status_label_fee;
-        $tooltip_fee = "Status: {$status_tip_fee}\nValor: R$ {$fee_val}\nCriação: {$created_label_fee}\nVencimento: {$venc_label_fee}\nPagamento: {$pag_label_fee}";
-    }
-
-    $r .= '<span class="status-box signup-fee '.esc_attr($cls_fee).'"'
-        .' data-tooltip="'.esc_attr($tooltip_fee).'"'
-        .' tabindex="0" aria-label="'.esc_attr($status_tip_fee).'"'
-        .' data-date="'.esc_attr($due_ymd_fee).'" data-month="'.esc_attr($due_ts_fee ? date_i18n('Y-m', $due_ts_fee) : '').'" data-due-ymd="'.esc_attr($due_ymd_fee).'" data-created-ymd="'.esc_attr($created_ymd_fee).'" data-paid-ymd="'.esc_attr($paid_ymd_fee).'"'
-        .' data-de-criacao="'.esc_attr($created_label_fee !== '—' ? $created_label_fee : '').'" data-de-vencimento="'.esc_attr($due_ts_fee ? date_i18n('d/m/Y', $due_ts_fee) : '').'" data-de-pagamento="'.esc_attr($pay_raw_fee ? date_i18n('d/m/Y', strtotime($pay_raw_fee)) : '').'"'
-        .' data-signup-fee="'.esc_attr($fee_val).'"'
-        .'></span>';
-    $r .= '<span class="status-separator" aria-hidden="true">-</span>';
+    return trim($css);
 }
 
-foreach ($installments as $p) {
-    // defaults
-    $cls = 'future';
-    $status_tip = 'Não criada';
-    $tooltip = 'Parcela não criada';
-
-    // datas/labels
-    $cre_raw = '';     $created_ymd = '';
-    $due_ts  = 0;      $due_ymd     = '';
-    $pay_raw = '';     $paid_ymd    = '';
-    $venc_label = '—'; $pag_label   = '—'; $created_label = '—';
-
-    if ($p) {
-        $val = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : '0,00';
-
-        // criação
-        $cre_raw = $p['created'] ?? ($p['createdAt'] ?? '');
-        if ($cre_raw) {
-            $created_ymd  = date_i18n('Y-m-d', strtotime($cre_raw));
-            $created_label = date_i18n('d/m/Y - H:i', strtotime($cre_raw));
-        }
-
-        // vencimento
-        $due_ts  = strtotime($p['dueDate'] ?? '');
-        $orig_ts = strtotime($p['originalDueDate'] ?? '');
-        $due_ts  = $due_ts ?: $orig_ts;
-        if ($due_ts) {
-            $due_ymd    = date_i18n('Y-m-d', $due_ts);
-            $venc_label = date_i18n('d/m/Y', $due_ts);
-        }
-
-        // pagamento
-        $pay_raw = $p['paymentDate'] ?? '';
-        if ($pay_raw) {
-            $paid_ymd  = date_i18n('Y-m-d', strtotime($pay_raw));
-            $pag_label = date_i18n('d/m/Y', strtotime($pay_raw));
-        }
-
-        // status "atual" (visão normal)
-        $p_stat   = strtoupper($p['paymentStatus'] ?? '');
-        $isPaid   = in_array($p_stat, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
-        $hojeYmd  = date_i18n('Y-m-d', current_time('timestamp'));
-        $isOver   = (!$isPaid && ($p_stat === 'OVERDUE' || ($due_ymd && $due_ymd < $hojeYmd)));
-
-        if ($isPaid)       { $cls='paid';    $status_tip='Pago'; }
-        elseif ($isOver)   { $cls='overdue'; $status_tip='Em atraso'; }
-        else               { $cls='pending'; $status_tip='Pendente'; }
-
-        $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created_label}\nVencimento: {$venc_label}\nPagamento: {$pag_label}";
-    }
-
-    $r .= '<span class="status-box '.esc_attr($cls).'"'
-        .' data-tooltip="'.esc_attr($tooltip).'"'
-        .' tabindex="0" aria-label="'.esc_attr($status_tip).'"'
-        // antigos (pt-BR, ainda usados pelo filtro mensal e tooltips)
-        .' data-de-criacao="'.esc_attr($created_label !== '—' ? $created_label : '').'"'
-        .' data-de-vencimento="'.esc_attr($due_ts ? date_i18n('d/m/Y', $due_ts) : '').'"'
-        .' data-de-pagamento="'.esc_attr($pay_raw ? date_i18n('d/m/Y', strtotime($pay_raw)) : '').'"'
-        .' data-month="'.esc_attr($due_ts ? date_i18n('Y-m', $due_ts) : '').'"'
-        .' data-date="'.esc_attr($due_ymd).'"'     /* <<< AQUI sem a barra invertida */
-        // NOVOS (ISO) — usados pelo histórico
-        .' data-created-ymd="'.esc_attr($created_ymd).'"'
-        .' data-due-ymd="'.esc_attr($due_ymd).'"'
-        .' data-paid-ymd="'.esc_attr($paid_ymd).'"'
-        .'></span>';
-
-}
-
-        $r .= '</td>';
-
-        $stat = strtoupper(trim($sub['status'] ?? ''));
-        $r .= '<td>';
-        if (in_array($stat,['CANCELLED','CANCELED','EXPIRED'],true)) {
-            $date = $sub['cancelled_at'] ?? ($sub['cancelledAt'] ?? ($sub['canceledAt'] ?? ($sub['expiredAt'] ?? ($sub['updated'] ?? ''))));
-            $r .= $date ? 'Cancelado em '.esc_html(date_i18n('d/m/Y', strtotime($date))) : 'Cancelado';
-        } else {
-            $r .= ($stat === 'ACTIVE') ? 'Ativo' : (($stat === 'INACTIVE') ? 'Inativo' : esc_html(ucfirst(strtolower($sub['status'] ?? '—'))));
-        }
-        $r .= '</td></tr>';
-        return $r;
-    };
-
-    $html = $css . $search . $legend;
-
-    foreach (['em_atraso'=>'Em Atraso','em_dia'=>'Em Dia','canceladas'=>'Canceladas'] as $key=>$titulo) {
-        $html .= '<h3 class="dash-h3">Assinaturas — '.esc_html($titulo).'</h3>';
-        $html .= '<div class="dash-table-scroll" role="region" aria-label="Tabela '.esc_attr($titulo).'">';
-        $html .= "<table id='dash-table-{$key}' class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
-        if (empty($grupos[$key])) {
-            $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
-        } else {
-            foreach ($grupos[$key] as $entry) { $html .= $build_row($entry['sub'],$entry['payments'],(int)$entry['product_id'],$entry['signup_meta'] ?? []); }
-        }
-        $html .= '</tbody></table></div>';
-    }
-
-    // ===== JS =====
-ob_start();
-?>
-<script>
+/**
+ * Constrói (sem <script>) todo o JS do dashboard, mantendo o conteúdo original.
+ */
+function dash_build_dashboard_js() {
+    ob_start();
+    ?>
 (function(){
   function $id(id){ return document.getElementById(id); }
   function onReady(fn){
@@ -960,7 +1050,7 @@ ob_start();
   // KPIs
   function countVisibleRows(tableId){
     var t=$id(tableId); if(!t) return 0;
-    var rows=t.querySelectorAll('tbody tr[id^="sub-"]');
+    var rows=t.querySelectorAll('tbody tr[id^=\"sub-\"]');
     var n=0; rows.forEach(function(r){ if(r.style.display!=='none') n++; });
     return n;
   }
@@ -972,7 +1062,7 @@ ob_start();
     var visAtr=countVisibleRows('dash-table-em_atraso');
     var visCanc=countVisibleRows('dash-table-canceladas');
     var visTotal=visDia+visAtr+visCanc;
-    var pDia=pct(visDia,visTotal), pAtr=pct(visAtr,visTotal), pCan=pct(visCanc,visTotal);
+    var pDia=pct(visDia,visTotal), pAtr=pct(visAtr,visTotal), pCan=pct(visCan,visTotal);
 
     setText('kpi-total-perc',(visTotal>0?'100%':'0%'));
     setText('kpi-dia-perc',pDia+'%'); setText('kpi-atraso-perc',pAtr+'%'); setText('kpi-cancel-perc',pCan+'%');
@@ -989,11 +1079,17 @@ ob_start();
     setBar('seg-dia',pDia);
     setBar('seg-atraso',pAtr);
     setBar('seg-cancel',pCan);
+
+    var note = $id('dash-summary-note');
+    if (note) {
+      var totalBase = parseInt(note.getAttribute('data-total') || '0', 10) || visTotal;
+      note.textContent = 'Mostrando ' + visTotal + ' de ' + totalBase + ' assinaturas';
+    }
   }
   window.updateSummary = updateSummary;
 
   function setRowTooltips(courseMap){
-    var rows=document.querySelectorAll('.dash-table tbody tr[id^="sub-"]');
+    var rows=document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]');
     rows.forEach(function(tr){
       var cid=String(tr.getAttribute('data-course-id')||'');
       var cbase=String(tr.getAttribute('data-course-base-id')||'');
@@ -1019,7 +1115,7 @@ ob_start();
 
   // ====== FILTRO principal (mês por CRIAÇÃO) ======
   function applyFilter(){
-    ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
+    ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]'));
 
     var inp=$id('dash-search-input'), sel=$id('dash-course-filter');
     var rawQ=inp?inp.value.trim():'';
@@ -1093,7 +1189,7 @@ ob_start();
   resetMonthPicker();
 
   // limpa efeitos visuais e exibe todas as linhas
-  ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
+  ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]'));
   ROWS.forEach(function(tr){
     tr.classList.remove('hist-hide-row');
     tr.style.display='';
@@ -1114,7 +1210,7 @@ ob_start();
 
     // ======== EXPORTAÇÃO XLS (somente o que está visível), agrupando por curso ========
   function collectVisibleRows(){
-    return [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'))
+    return [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]'))
       .filter(function(tr){ return tr.style.display !== 'none' && !tr.classList.contains('hist-hide-row'); });
   }
   function collectVisibleBoxes(tr){
@@ -1406,17 +1502,14 @@ ob_start();
     }
 
     setRowTooltips(buildCourseMap());
-    ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^="sub-"]'));
+    ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]'));
     updateSummary();
   }
   window.dashClearFilter = clearFilter; 
 
   onReady(init);
 })();
-</script>
 
-<script>
-/* Reagrupamento dinâmico de linhas (depois de mês/histórico) */
 (function(){
   function $id(id){ return document.getElementById(id); }
 
@@ -1460,7 +1553,7 @@ ob_start();
     var tbodyAtr = tbAtr ? tbAtr.querySelector('tbody') : null;
     var tbodyCan = tbCan ? tbCan.querySelector('tbody') : null;
 
-    var rows = document.querySelectorAll('.dash-table tbody tr[id^="sub-"]');
+    var rows = document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]');
     rows.forEach(function(tr){
       if(tr.style.display === 'none') return; // já ocultada por busca/curso/histórico
 
@@ -1496,138 +1589,76 @@ ob_start();
   // exporta p/ outros blocos
   window.dashRegroupRows = dashRegroupRows;
 })();
-</script>
 
 
-<script>
-/* Datepicker: limita aos meses realmente existentes nas status-box. Fallback para <input type="month"> */
-(function($){
-  function hasDP(){ return $.datepicker && typeof $.datepicker === 'object'; }
+(function(){
+  // Month picker nativo com validação de meses permitidos
   function pad2(n){ return (n<10?'0':'')+n; }
-  function ym(y,mIdx){ return y+'-'+pad2(mIdx+1); }       // mIdx 0..11
-  function ymToDate(ym){ var m=String(ym||'').match(/^(\d{4})-(\d{2})$/); return m ? new Date(parseInt(m[1],10), parseInt(m[2],10)-1, 1) : null; }
 
-  // >>>> COLETA MESES POR CRIAÇÃO (prioriza data-de-criacao) <<<<
-function collectAllowedMonthsByCreation(){
-  function pad2(n){ return (n<10?'0':'')+n; }
-  var set = new Set();
-
-  document.querySelectorAll('.status-box').forEach(function(box){
-    // 1) BR primeiro
-    var br = box.getAttribute('data-de-criacao') || '';
-    if (br) {
-      var mb = String(br).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      if (mb) {
-        set.add(mb[3] + '-' + pad2(parseInt(mb[2],10)));
-        return;
+  function collectAllowedMonthsByCreation(){
+    var set = new Set();
+    document.querySelectorAll('.status-box').forEach(function(box){
+      var br = box.getAttribute('data-de-criacao') || '';
+      if (br) {
+        var mb = String(br).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (mb) {
+          set.add(mb[3] + '-' + pad2(parseInt(mb[2],10)));
+          return;
+        }
       }
-    }
-    // 2) Fallback ISO
-    var iso = box.getAttribute('data-created-ymd') || '';
-    var mi = String(iso).match(/^(\d{4})-(\d{2})-\d{2}$/);
-    if (mi) {
-      set.add(mi[1] + '-' + mi[2]);
-    }
-  });
-
-  var arr = Array.from(set);
-  arr.sort(function(a,b){ return a<b ? -1 : (a>b ? 1 : 0); });
-  return arr;
-}
-  function enforceMonthOptions(dpDiv, byYear){
-    var $ySel = dpDiv.find('.ui-datepicker-year');
-    var $mSel = dpDiv.find('.ui-datepicker-month');
-    $ySel.find('option').each(function(){
-      var y = $(this).val();
-      $(this).prop('disabled', !byYear[y]);
+      var iso = box.getAttribute('data-created-ymd') || '';
+      var mi = String(iso).match(/^(\d{4})-(\d{2})-\d{2}$/);
+      if (mi) {
+        set.add(mi[1] + '-' + mi[2]);
+      }
     });
-    var curY = parseInt($ySel.val(),10);
-    if(!byYear[curY]){
-      var years = Object.keys(byYear).map(function(s){return parseInt(s,10);}).sort(function(a,b){return a-b;});
-      if(years.length){ $ySel.val(String(years[0])); curY = years[0]; }
-    }
-    $mSel.find('option').each(function(idx){
-      $(this).prop('disabled', !(byYear[curY] && byYear[curY][idx]));
-    });
+    var arr = Array.from(set);
+    arr.sort(function(a,b){ return a<b ? -1 : (a>b ? 1 : 0); });
+    return arr;
   }
 
-  $(function(){
-    var $inp = $('#dash-month-picker');
-    if(!$inp.length) return;
+  function initNativeMonthPicker(){
+    var inp = document.getElementById('dash-month-picker');
+    if (!inp) return;
 
     var allowed = collectAllowedMonthsByCreation();
-    if(!allowed.length){
-      return;
-    }
-
-    var byYear = {};
-    allowed.forEach(function(k){
-      var y = k.slice(0,4), mi = parseInt(k.slice(5,7),10)-1;
-      if(!byYear[y]) byYear[y] = {};
-      byYear[y][mi] = true;
-    });
+    if (!allowed.length) return;
 
     var allowedSet = new Set(allowed);
     var minYm = allowed[0], maxYm = allowed[allowed.length-1];
-    var minDate = ymToDate(minYm), maxDate = ymToDate(maxYm);
-
-    var minLabel = minYm.slice(5,7) + '/' + minYm.slice(0,4);
-    var maxLabel = maxYm.slice(5,7) + '/' + maxYm.slice(0,4);
-    if(!$inp.val()){ $inp.attr('placeholder', 'De '+minLabel+' a '+maxLabel); }
-
-    if(!hasDP()){
-      try{
-        $inp.attr('type','month').removeAttr('readonly').attr('min', minYm).attr('max', maxYm);
-        $inp.on('change', function(){
-          var v = $(this).val();
-          if(!allowedSet.has(v)){ $(this).val(''); }
-          this.dispatchEvent(new Event('input'));
-        });
-      }catch(e){}
-      return;
+    if (!inp.value) {
+      // Mostra faixa válida no placeholder (quando suportado)
+      inp.placeholder = 'De ' + minYm.slice(5,7) + '/' + minYm.slice(0,4) + ' a ' + maxYm.slice(5,7) + '/' + maxYm.slice(0,4);
     }
 
-    $inp.datepicker({
-      dateFormat: 'yy-mm',
-      changeMonth: true,
-      changeYear: true,
-      showButtonPanel: true,
-      minDate: minDate,
-      maxDate: maxDate,
-      beforeShow: function(input, inst){ setTimeout(function(){ enforceMonthOptions(inst.dpDiv, byYear); }, 0); },
-      onChangeMonthYear: function(year, month, inst){ setTimeout(function(){ enforceMonthOptions(inst.dpDiv, byYear); }, 0); },
-      onClose: function(dateText, inst){
-        var dpDiv = inst.dpDiv;
-        var mIdx  = parseInt(dpDiv.find('.ui-datepicker-month :selected').val(),10);
-        var yVal  = parseInt(dpDiv.find('.ui-datepicker-year :selected').val(),10);
-        var key   = ym(yVal, mIdx);
+    // Força input month nativo
+    try {
+      inp.type = 'month';
+      inp.min  = minYm;
+      inp.max  = maxYm;
+    } catch(e){}
 
-        if(!allowedSet.has(key)){
-          if($(this).val() && !allowedSet.has($(this).val())) $(this).val('');
-          return;
-        }
-        var d = ymToDate(key);
-        if(d < minDate) d = minDate;
-        if(d > maxDate) d = maxDate;
-        $(this).datepicker('setDate', d);
-        $(this).val(key);
-        $(this).trigger('dash:monthChanged', [key]);
+    function clamp(){
+      var v = (inp.value || '').trim();
+      if (!v) return;
+      if (!allowedSet.has(v)) {
+        inp.value = '';
+        return;
       }
-    });
+      if (v < minYm) inp.value = minYm;
+      if (v > maxYm) inp.value = maxYm;
+    }
+    inp.addEventListener('change', clamp);
+    inp.addEventListener('input', clamp);
+  }
 
-    $inp.on('focus', function(){
-      var v = $inp.val();
-      var d = v ? ymToDate(v) : minDate;
-      $inp.datepicker('setDate', d);
-      var inst = $inp.data('datepicker');
-      if(inst){ setTimeout(function(){ enforceMonthOptions(inst.dpDiv, byYear); }, 0); }
-    });
-  });
-})(jQuery);
-</script>
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initNativeMonthPicker, { once:true });
+  } else {
+    initNativeMonthPicker();
+  }
+})();
 
-<script>
-/* Histórico (criação + vencimento + pagamento), */
 (function(){
   function $id(id){ return document.getElementById(id); }
 
@@ -1759,7 +1790,7 @@ function resolveHistoricalStatus(box, refInt){
     if(banner) banner.style.display = 'block';
     if(lab)    lab.textContent = isoToBr(refYmd);
 
-    document.querySelectorAll('.dash-table tbody tr[id^="sub-"]').forEach(function(tr){
+    document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]').forEach(function(tr){
       var bornCount = 0;
       tr.querySelectorAll('.status-box').forEach(function(box){
         captureOriginalOnce(box);
@@ -1789,7 +1820,7 @@ function resolveHistoricalStatus(box, refInt){
   }
 
   function clearHistorical(){
-    document.querySelectorAll('.dash-table tbody tr[id^="sub-"]').forEach(function(tr){
+    document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]').forEach(function(tr){
       tr.classList.remove('hist-hide-row');
       tr.style.display='';
       tr.querySelectorAll('.status-box').forEach(function(box){
@@ -1820,10 +1851,7 @@ function initAutoHistorical(){
     initAutoHistorical();
   }
 })();
-</script>
 
-<script>
-/* Ligações explícitas dos botões do histórico (sem auto-aplicar no input) */
 (function(){
   function $id(id){ return document.getElementById(id); }
 
@@ -1908,9 +1936,7 @@ if (btnClear) {
     bindHistoryButtons();
   }
 })();
-</script>
 
-<script>
 (function(){
   function $id(id){ return document.getElementById(id); }
   function toISO(brOrIso){
@@ -1985,9 +2011,470 @@ if (btnClear) {
     setHistDateLimits();
   }
 })();
-</script>
 <?php
-$html .= dash_minify_js(ob_get_clean());
+    return dash_minify_js(ob_get_clean());
+}
+
+/**
+ * Enfileira CSS/JS do dashboard (uma vez).
+ */
+function dash_enqueue_dashboard_assets() {
+    static $done = false;
+    if ($done) return;
+    $done = true;
+
+    dash_register_assets();
+
+    wp_enqueue_style('dash-colab-dashboard');
+    $css = dash_build_dashboard_css();
+    if ($css !== '') {
+        wp_add_inline_style('dash-colab-dashboard', $css);
+    }
+
+    wp_enqueue_script('dash-colab-dashboard');
+    $js = dash_build_dashboard_js();
+    if ($js !== '') {
+        wp_add_inline_script('dash-colab-dashboard', $js);
+    }
+}
+
+/**
+ * Auto-enfileira assets nas páginas que usam o shortcode.
+ */
+function dash_maybe_enqueue_dashboard_assets() {
+    if (!dash_page_has_dashboard_shortcode()) {
+        return;
+    }
+    if (dash_user_can_view_dashboard()) {
+        dash_enqueue_dashboard_assets();
+    } else {
+        dash_enqueue_login_assets();
+    }
+}
+add_action('wp_enqueue_scripts','dash_register_assets',5);
+add_action('wp_enqueue_scripts','dash_maybe_enqueue_dashboard_assets');
+
+/**
+ * =============================================================
+ * 3) Renderização do Dashboard
+ * =============================================================
+ */
+function mostrar_dashboard_assinantes($atts = []) {
+    $atts = shortcode_atts(['id'=>0,'corseid'=>0], $atts, 'dashboard_assinantes_e_pedidos');
+    $raw = $atts['corseid'] ?: $atts['id'];
+    if (is_string($raw) && preg_match('/^\s*(\d+)/',$raw,$m)) $raw = $m[1];
+
+    $filter_id = absint($raw);
+    $filter_base_id = $filter_id ? dash_maybe_get_parent_product_id($filter_id) : 0;
+
+    $locked_by_id = $filter_id > 0;
+    $locked_course_name = '';
+    if ($locked_by_id) {
+        $locked_course_name = dash_get_product_name($filter_base_id ?: $filter_id);
+    }
+
+    if (!dash_user_can_view_dashboard()) {
+        dash_enqueue_login_assets();
+        return dash_render_login_prompt();
+    }
+
+    dash_enqueue_dashboard_assets();
+
+    $subs = dash_fetch_all_asaas_subscriptions();
+    $agora = current_time('timestamp');
+    $hojeYmd = date_i18n('Y-m-d',$agora);
+
+    $subscription_table_ids = [];
+    $subscriptionIDs = [];
+    foreach ($subs as $s) {
+        $subscription_table_ids[] = (int)($s['id'] ?? 0);
+        $subscriptionIDs[] = (string)($s['subscriptionID'] ?? '');
+    }
+
+    $pid_map = dash_get_product_map_for_subscriptions($subscription_table_ids);
+    $pay_map = dash_fetch_payments_map(array_filter($subscriptionIDs));
+
+    // Lista única de IDs de cursos para o <select>
+    $course_ids_set = [];
+    if (!empty($pid_map)) {
+        foreach ($pid_map as $__sub_table_id => $__pid) { $__pid = (int)$__pid; if ($__pid > 0) { $course_ids_set[$__pid] = true; } }
+    }
+    $course_ids_unique = array_keys($course_ids_set);
+    sort($course_ids_unique, SORT_NUMERIC);
+
+    $name_cache = [];
+    $course_options = '<option value="">Todos</option>';
+    foreach ($course_ids_unique as $__cid) {
+        $display_id = dash_maybe_get_parent_product_id($__cid);
+        if (!isset($name_cache[$display_id])) {
+            $name = '';
+            if (function_exists('wc_get_product')) { $p = wc_get_product($display_id); if ($p) { $name = $p->get_name(); } }
+            if (!$name) { $name = get_post_field('post_title',$display_id); }
+            if (!$name) { $name = 'Produto #'. $__cid; }
+            $name_cache[$display_id] = $name;
+        }
+        $course_options .= '<option value="'.esc_attr($__cid).'">'.esc_html($name_cache[$display_id]).'</option>';
+    }
+
+    $course_select_html = '';
+    if ($locked_by_id) {
+        $course_select_html = '';
+    } else {
+        $course_select_html = '<select id="dash-course-filter" class="dash-input dash-select" aria-label="Filtrar por ID do curso">'
+                            . $course_options
+                            . '</select>';
+    }
+
+    $expiredStatuses = ['CANCELLED','CANCELED','EXPIRED'];
+    $overdueStatuses = ['OVERDUE'];
+    $mapPaid = ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'];
+
+    $grupos = ['em_dia'=>[],'em_atraso'=>[],'canceladas'=>[]];
+
+    foreach ($subs as $sub) {
+        $subscription_pk_id = (int)($sub['id'] ?? 0);
+        $subscriptionID = (string)($sub['subscriptionID'] ?? '');
+        $pid_for_select = (int)($pid_map[$subscription_pk_id] ?? 0);
+        $has_payments_entry = array_key_exists($subscriptionID, $pay_map);
+        $payments_raw = array_values($pay_map[$subscriptionID] ?? []);
+        $signup_fee_amount = dash_get_subscription_signup_fee($pid_for_select);
+        $split_payments = dash_filter_signup_fee_payments($payments_raw, $signup_fee_amount);
+        $payments = array_values($split_payments['payments']);
+        $signup_fees = array_values($split_payments['fees']);
+        $signup_fee_count = count($signup_fees);
+        $signup_fee_payment = $signup_fees ? $signup_fees[0] : null; // pega a 1ª taxa (se houver)
+        if ($signup_fee_amount > 0 && $signup_fee_count === 0) {
+            // Garante exibição do box mesmo que ainda não haja linha de pagamento marcada como taxa
+            $signup_fee_count = 1;
+        }
+
+        if ($filter_id) {
+            $pid_base = dash_maybe_get_parent_product_id($pid_for_select);
+            if ((int)$pid_for_select !== (int)$filter_id && (int)$pid_base !== (int)$filter_base_id) continue;
+        }
+
+        $stat_raw = strtoupper(trim($sub['status'] ?? ''));
+        if ($has_payments_entry && empty($payments) && empty($signup_fees) && $signup_fee_amount <= 0) continue;
+
+        if (in_array($stat_raw,$expiredStatuses,true)) {
+            $grupos['canceladas'][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select,'signup_meta'=>['signup_fee_amount'=>$signup_fee_amount,'signup_fee_count'=>$signup_fee_count,'signup_fee_payment'=>$signup_fee_payment]];
+            continue;
+        }
+
+        $hasOverdue = in_array($stat_raw,$overdueStatuses,true);
+        if (!$hasOverdue && $payments) {
+            foreach ($payments as $p) {
+                $p_stat = strtoupper($p['paymentStatus'] ?? '');
+                $due_ts  = strtotime($p['dueDate'] ?? '');
+                $orig_ts = strtotime($p['originalDueDate'] ?? '');
+                $venc_ts = $due_ts ?: $orig_ts;
+                $dueYmd = $venc_ts ? date_i18n('Y-m-d',$venc_ts) : null;
+                $isPaid = in_array($p_stat,$mapPaid,true);
+                if (!$isPaid && ($p_stat === 'OVERDUE' || ($dueYmd && $dueYmd < $hojeYmd))) { $hasOverdue = true; break; }
+            }
+        }
+
+        $key = $hasOverdue ? 'em_atraso' : 'em_dia';
+        $grupos[$key][] = ['sub'=>$sub,'payments'=>$payments,'product_id'=>$pid_for_select,'signup_meta'=>['signup_fee_amount'=>$signup_fee_amount,'signup_fee_count'=>$signup_fee_count,'signup_fee_payment'=>$signup_fee_payment]];
+    }
+
+    $cnt_dia = count($grupos['em_dia']);
+    $cnt_atraso = count($grupos['em_atraso']);
+    $cnt_canceladas = count($grupos['canceladas']);
+    $cnt_total = $cnt_dia + $cnt_atraso + $cnt_canceladas;
+
+    $pct_total = $cnt_total > 0 ? 100 : 0;
+    $pct_dia = $cnt_total > 0 ? round(($cnt_dia / $cnt_total) * 100) : 0;
+    $pct_atraso = $cnt_total > 0 ? round(($cnt_atraso / $cnt_total) * 100) : 0;
+    $pct_canceladas = $cnt_total > 0 ? round(($cnt_canceladas / $cnt_total) * 100) : 0;
+
+    $requests_html = '';
+    $accepted_html = '';
+    if (current_user_can('manage_options')) {
+        $pending = dash_get_pending_requests();
+        if (!empty($pending)) {
+            $requests_html .= '<div class="dash-requests" role="status" aria-live="polite"><h3>Solicitações de acesso</h3>';
+            $action = esc_url(admin_url('admin-post.php'));
+            foreach ($pending as $req) {
+                $uid = (int)($req['user_id'] ?? 0);
+                $nm  = $req['name'] ?? '';
+                $em  = $req['email'] ?? '';
+                $lg  = $req['login'] ?? '';
+                $ts  = !empty($req['time']) ? date_i18n('d/m/Y H:i', (int)$req['time']) : '';
+                $requests_html .= '<div class="dash-request-card"><div class="dash-request-meta"><strong>'.esc_html($nm ?: 'Solicitante sem nome').'</strong><div>'.esc_html($em ?: 'Sem e-mail').' · '.esc_html($lg ?: 'sem login').'</div><div>Enviado em '.esc_html($ts ?: '—').'</div></div><div class="dash-request-actions">';
+                $requests_html .= '<form method="post" action="'.$action.'">'.wp_nonce_field('dash_decide_access','_dashdec',true,false).'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr($uid).'"><input type="hidden" name="decision" value="approve"><button type="submit" class="button button-primary">Aceitar</button></form>';
+                $requests_html .= '<form method="post" action="'.$action.'">'.wp_nonce_field('dash_decide_access','_dashdec',true,false).'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr($uid).'"><input type="hidden" name="decision" value="reject"><button type="submit" class="button">Recusar</button></form>';
+                $requests_html .= '</div></div>';
+            }
+            $requests_html .= '</div>';
+        }
+
+        $whitelist = dash_get_whitelist();
+        if (!empty($whitelist)) {
+            $action = esc_url(admin_url('admin-post.php'));
+            $accepted_html .= '<div class="dash-accepted"><details><summary class="dash-user-icon-wrap"><span class="dash-user-icon" aria-label="Usuários liberados"><span>👤</span></span><span>Usuários liberados</span></summary><div class="dash-accepted-list" role="menu">';
+            $accepted_html .= '<button type="button" class="dash-accepted-close" aria-label="Fechar" onclick="this.closest(\'details\').removeAttribute(\'open\')">×</button>';
+            $accepted_html .= '<h4>Autorizados</h4>';
+            foreach (array_keys($whitelist) as $uid) {
+                $u = get_userdata((int)$uid);
+                if (!$u) continue;
+                $nm = $u->display_name ?: $u->user_login;
+                $em = $u->user_email ?: '';
+                $accepted_html .= '<div class="dash-accepted-item"><strong>'.esc_html($nm).'</strong><small>'.esc_html($em).'</small><form method="post" action="'.$action.'">'.wp_nonce_field('dash_decide_access','_dashdec',true,false).'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr((int)$uid).'"><input type="hidden" name="decision" value="reject"><button type="submit" class="button">Revogar</button></form></div>';
+            }
+            $accepted_html .= '</div></details></div>';
+        }
+    }
+
+    $heading  = $requests_html . '<div class="dash-wrap">' . $accepted_html;
+    $heading .= '<h2 class="dash-title">Dashboard de assinaturas</h2>';
+    if ($locked_by_id) {
+        $heading .= '<div class="dash-locked-course">Curso: <strong>'.esc_html($locked_course_name).'</strong></div>';
+        $locked_meta = $locked_by_id
+          ? '<div id="dash-locked-meta" data-locked="1" data-course-id="'.esc_attr($filter_id).'" data-course-base-id="'.esc_attr($filter_base_id ?: $filter_id).'" data-course-name="'.esc_attr($locked_course_name).'"></div>'
+          : '<div id="dash-locked-meta" data-locked="0"></div>';
+        $heading .= $locked_meta;
+
+    }
+    $heading .= '</div>';
+
+    // ===== RESUMO =====
+    $summary = $heading . '<div class="dash-summary" role="region" aria-label="Resumo das assinaturas"><div class="dash-kpi total" role="status" aria-live="polite"><div class="dash-kpi-label">Assinaturas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-total-perc">'.$pct_total.'%</span><small class="dash-kpi-abs" id="kpi-total-abs">'.(int)$cnt_total.' assinaturas</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-total" style="width:'.$pct_total.'%"></span></div></div><div class="dash-kpi emdia" role="status" aria-live="polite"><div class="dash-kpi-label">Em Dia</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-dia-perc">'.$pct_dia.'%</span><small class="dash-kpi-abs" id="kpi-dia-abs">'.(int)$cnt_dia.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-dia" style="width:'.$pct_dia.'%"></span></div></div><div class="dash-kpi atraso" role="status" aria-live="polite"><div class="dash-kpi-label">Em Atraso</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-atraso-perc">'.$pct_atraso.'%</span><small class="dash-kpi-abs" id="kpi-atraso-abs">'.(int)$cnt_atraso.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-atraso" style="width:'.$pct_atraso.'%"></span></div></div><div class="dash-kpi cancel" role="status" aria-live="polite"><div class="dash-kpi-label">Canceladas</div><div class="dash-kpi-value"><span class="dash-kpi-perc" id="kpi-cancel-perc">'.$pct_canceladas.'%</span><small class="dash-kpi-abs" id="kpi-cancel-abs">'.(int)$cnt_canceladas.' de '.(int)$cnt_total.'</small></div><div class="dash-kpi-bar" aria-hidden="true"><span id="bar-cancel" style="width:'.$pct_canceladas.'%"></span></div></div></div><div class="dash-composition" aria-label="Composição por status (visível)"><div class="dash-stacked"><span id="seg-dia" class="seg seg-dia" style="width:'.$pct_dia.'%"></span><span id="seg-atraso" class="seg seg-atraso" style="width:'.$pct_atraso.'%"></span><span id="seg-cancel" class="seg seg-cancel" style="width:'.$pct_canceladas.'%"></span></div><div class="dash-comp-label">Composição do conjunto visível (Em Dia / Em Atraso / Canceladas)</div></div><div class="dash-summary-note" id="dash-summary-note" data-total="'.(int)$cnt_total.'">Mostrando '.(int)$cnt_total.' de '.(int)$cnt_total.' assinaturas</div>';
+
+    // ===== Barra de busca + Histórico =====
+    $search = '<div class="dash-wrap">'.$summary.'
+    <!-- 1ª linha: filtros normais -->
+    <div class="dash-search" role="search" aria-label="Filtrar assinantes">
+      '.$course_select_html.'
+      <input type="month" id="dash-month-picker" class="dash-input dash-select" aria-label="Selecionar mês e ano">
+      <input type="text" id="dash-search-input" class="dash-input" placeholder="Buscar por nome, e-mail ou CPF" aria-label="Buscar por nome, e-mail ou CPF">
+      <button type="button" id="dash-search-btn" class="dash-btn">Buscar</button>
+      <button type="button" id="dash-clear-btn" class="dash-btn" aria-label="Limpar filtros">Limpar</button>
+
+      <!-- baixar csv -->
+      <button type="button" id="dash-export-xls-btn" class="dash-btn" aria-label="Baixar relatório XLS">Baixar relatório (XLS)</button>
+    </div>
+
+    <!-- 2ª linha: controles do modo histórico -->
+    <div class="dash-hist-row" role="group" aria-label="Histórico">
+      <input type="date" id="dash-snapshot-date" class="dash-input dash-select" aria-label="Data de referência (histórico)" placeholder="AAAA-MM-DD">
+      <button type="button" id="dash-snapshot-apply" class="dash-btn" aria-label="Aplicar histórico">Histórico</button>
+      <button type="button" id="dash-snapshot-clear" class="dash-btn" aria-label="Sair do histórico">Sair do histórico</button>
+    </div>
+
+    <!-- Banner do histórico -->
+    <div id="dash-hist-banner" class="dash-hist-banner" style="display:none" role="status" aria-live="polite">
+      Modo histórico ativo em <strong id="dash-hist-date-label"></strong>. Os filtros normais ficam temporariamente ignorados.
+    </div>';
+
+
+    // ===== Legenda =====
+    $legend = '<div class="dash-legend">
+      <span><span class="status-box paid" tabindex="0" aria-label="Pago"></span> Pago</span>
+      <span><span class="status-box overdue" tabindex="0" aria-label="Em atraso"></span> Em atraso</span>
+      <span><span class="status-box pending" tabindex="0" aria-label="Pendente"></span> Pendente</span>
+      <span><span class="status-box future" tabindex="0" aria-label="Não criada"></span> Não criada</span>
+    </div>';
+
+    // Inicia HTML
+    $html  = $search . $legend;
+
+    // ===== Tabela builder =====
+    $build_row = function(array $sub, array $payments, int $product_id, array $meta = []) use ($agora, $hojeYmd) {
+        $subscription_pk_id = (int)($sub['id'] ?? 0);
+        $base_id = dash_maybe_get_parent_product_id($product_id);
+        $signup_fee_count = (int)($meta['signup_fee_count'] ?? 0);
+        $signup_fee_amount = (float)($meta['signup_fee_amount'] ?? 0);
+        if ($signup_fee_amount > 0 && $signup_fee_count === 0) {
+            $signup_fee_count = 1;
+        }
+        $signup_fee_payment = $meta['signup_fee_payment'] ?? null;
+        $signup_fee_attr = $signup_fee_amount > 0 ? number_format($signup_fee_amount, 2, '.', '') : '0.00';
+
+        $totalInstallments = 6;
+        $cycles = null;
+        if ($product_id) {
+            $cycles = dash_get_subscription_cycles_from_product($product_id);
+            if ($cycles !== null) $totalInstallments = ($cycles > 0) ? (int)$cycles : max(count($payments),6);
+        }
+        if ((!$product_id || $cycles === null) && !empty($sub['order_id'])) {
+            $maybe_cycles = dash_get_cycles_from_wc_subscription_order($sub['order_id']);
+            if ($maybe_cycles !== null) $totalInstallments = ($maybe_cycles > 0) ? (int)$maybe_cycles : max(count($payments),6);
+        }
+        if (count($payments) > $totalInstallments) $totalInstallments = count($payments);
+
+        $installments = array_fill(0,$totalInstallments,null);
+        foreach ($payments as $p) {
+            $idx = (isset($p['installmentNumber']) && is_numeric($p['installmentNumber'])) ? ((int)$p['installmentNumber'] - 1) : null;
+            if ($idx === null || $idx < 0 || $idx >= $totalInstallments) $idx = array_search(null,$installments,true);
+            if ($idx !== false) $installments[$idx] = $p;
+        }
+
+        $cpf_display = $sub['cpf'] ?? ($sub['customer_cpf'] ?? '—');
+        $r  = '<tr id="sub-'.(int)$subscription_pk_id.'" data-course-id="'.esc_attr($product_id ?: 0).'" data-course-base-id="'.esc_attr($base_id ?: 0).'" data-signup-fee-count="'.esc_attr($signup_fee_count).'" data-signup-fee="'.esc_attr($signup_fee_attr).'">';
+        $r .= '<td>'.esc_html($sub['customer_name'] ?? '—').'</td>';
+        $r .= '<td>'.esc_html($sub['customer_email'] ?? '—').'</td>';
+        $r .= '<td>'.esc_html($cpf_display).'</td>';
+
+        $r .= '<td>';
+
+if ($signup_fee_amount > 0 || $signup_fee_count > 0) {
+    $fee_val = $signup_fee_amount > 0 ? number_format($signup_fee_amount, 2, ',', '.') : '—';
+
+    // Defaults para taxa sem linha registrada (override)
+    $cls_fee = 'pending';
+    $status_label_fee = 'Pendente';
+    $status_tip_fee = 'Taxa de inscrição — '.$status_label_fee;
+    $tooltip_fee = "Status: {$status_tip_fee}\nValor: R$ {$fee_val}\nCriação: —\nVencimento: —\nPagamento: —";
+    $created_label_fee = $venc_label_fee = $pag_label_fee = '—';
+    $due_ts_fee = 0;
+    $created_ymd_fee = $due_ymd_fee = $paid_ymd_fee = '';
+    $pay_raw_fee = '';
+
+    if (is_array($signup_fee_payment) && !empty($signup_fee_payment)) {
+        $p = $signup_fee_payment;
+        $val_raw = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : $fee_val;
+        $fee_val = $val_raw;
+
+        $cre_raw = $p['created'] ?? ($p['createdAt'] ?? '');
+        if ($cre_raw) {
+            $created_ymd_fee = date_i18n('Y-m-d', strtotime($cre_raw));
+            $created_label_fee = date_i18n('d/m/Y - H:i', strtotime($cre_raw));
+        }
+
+        $due_ts_fee  = strtotime($p['dueDate'] ?? '');
+        $orig_ts_fee = strtotime($p['originalDueDate'] ?? '');
+        $due_ts_fee  = $due_ts_fee ?: $orig_ts_fee;
+        if ($due_ts_fee) {
+            $due_ymd_fee = date_i18n('Y-m-d', $due_ts_fee);
+            $venc_label_fee = date_i18n('d/m/Y', $due_ts_fee);
+        }
+
+        $pay_raw_fee = $p['paymentDate'] ?? '';
+        if ($pay_raw_fee) {
+            $paid_ymd_fee = date_i18n('Y-m-d', strtotime($pay_raw_fee));
+            $pag_label_fee = date_i18n('d/m/Y', strtotime($pay_raw_fee));
+        }
+
+        $p_stat_fee   = strtoupper($p['paymentStatus'] ?? '');
+        $isPaidFee    = in_array($p_stat_fee, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
+        $isOverFee    = (!$isPaidFee && ($p_stat_fee === 'OVERDUE' || ($due_ymd_fee && $due_ymd_fee < $hojeYmd)));
+
+        if ($isPaidFee)       { $cls_fee='paid';    $status_label_fee='Pago'; }
+        elseif ($isOverFee)   { $cls_fee='overdue'; $status_label_fee='Em atraso'; }
+        else                  { $cls_fee='pending'; $status_label_fee='Pendente'; }
+
+        $status_tip_fee = 'Taxa de inscrição — '.$status_label_fee;
+        $tooltip_fee = "Status: {$status_tip_fee}\nValor: R$ {$fee_val}\nCriação: {$created_label_fee}\nVencimento: {$venc_label_fee}\nPagamento: {$pag_label_fee}";
+    }
+
+    $r .= '<span class="status-box signup-fee '.esc_attr($cls_fee).'"'
+        .' data-tooltip="'.esc_attr($tooltip_fee).'"'
+        .' tabindex="0" aria-label="'.esc_attr($status_tip_fee).'"'
+        .' data-date="'.esc_attr($due_ymd_fee).'" data-month="'.esc_attr($due_ts_fee ? date_i18n('Y-m', $due_ts_fee) : '').'" data-due-ymd="'.esc_attr($due_ymd_fee).'" data-created-ymd="'.esc_attr($created_ymd_fee).'" data-paid-ymd="'.esc_attr($paid_ymd_fee).'"'
+        .' data-de-criacao="'.esc_attr($created_label_fee !== '—' ? $created_label_fee : '').'" data-de-vencimento="'.esc_attr($due_ts_fee ? date_i18n('d/m/Y', $due_ts_fee) : '').'" data-de-pagamento="'.esc_attr($pay_raw_fee ? date_i18n('d/m/Y', strtotime($pay_raw_fee)) : '').'"'
+        .' data-signup-fee="'.esc_attr($fee_val).'"'
+        .'></span>';
+    $r .= '<span class="status-separator" aria-hidden="true">-</span>';
+}
+
+foreach ($installments as $p) {
+    // defaults
+    $cls = 'future';
+    $status_tip = 'Não criada';
+    $tooltip = 'Parcela não criada';
+
+    // datas/labels
+    $cre_raw = '';     $created_ymd = '';
+    $due_ts  = 0;      $due_ymd     = '';
+    $pay_raw = '';     $paid_ymd    = '';
+    $venc_label = '—'; $pag_label   = '—'; $created_label = '—';
+
+    if ($p) {
+        $val = isset($p['value']) ? number_format((float)$p['value'], 2, ',', '.') : '0,00';
+
+        // criação
+        $cre_raw = $p['created'] ?? ($p['createdAt'] ?? '');
+        if ($cre_raw) {
+            $created_ymd  = date_i18n('Y-m-d', strtotime($cre_raw));
+            $created_label = date_i18n('d/m/Y - H:i', strtotime($cre_raw));
+        }
+
+        // vencimento
+        $due_ts  = strtotime($p['dueDate'] ?? '');
+        $orig_ts = strtotime($p['originalDueDate'] ?? '');
+        $due_ts  = $due_ts ?: $orig_ts;
+        if ($due_ts) {
+            $due_ymd    = date_i18n('Y-m-d', $due_ts);
+            $venc_label = date_i18n('d/m/Y', $due_ts);
+        }
+
+        // pagamento
+        $pay_raw = $p['paymentDate'] ?? '';
+        if ($pay_raw) {
+            $paid_ymd  = date_i18n('Y-m-d', strtotime($pay_raw));
+            $pag_label = date_i18n('d/m/Y', strtotime($pay_raw));
+        }
+
+        // status "atual" (visão normal)
+        $p_stat   = strtoupper($p['paymentStatus'] ?? '');
+        $isPaid   = in_array($p_stat, ['PAYED','PAID','RECEIVED','RECEIVED_IN_CASH','CONFIRMED'], true);
+        $hojeYmd  = date_i18n('Y-m-d', current_time('timestamp'));
+        $isOver   = (!$isPaid && ($p_stat === 'OVERDUE' || ($due_ymd && $due_ymd < $hojeYmd)));
+
+        if ($isPaid)       { $cls='paid';    $status_tip='Pago'; }
+        elseif ($isOver)   { $cls='overdue'; $status_tip='Em atraso'; }
+        else               { $cls='pending'; $status_tip='Pendente'; }
+
+        $tooltip = "Status: {$status_tip}\nValor: R$ {$val}\nCriação: {$created_label}\nVencimento: {$venc_label}\nPagamento: {$pag_label}";
+    }
+
+    $r .= '<span class="status-box '.esc_attr($cls).'"'
+        .' data-tooltip="'.esc_attr($tooltip).'"'
+        .' tabindex="0" aria-label="'.esc_attr($status_tip).'"'
+        // antigos (pt-BR, ainda usados pelo filtro mensal e tooltips)
+        .' data-de-criacao="'.esc_attr($created_label !== '—' ? $created_label : '').'"'
+        .' data-de-vencimento="'.esc_attr($due_ts ? date_i18n('d/m/Y', $due_ts) : '').'"'
+        .' data-de-pagamento="'.esc_attr($pay_raw ? date_i18n('d/m/Y', strtotime($pay_raw)) : '').'"'
+        .' data-month="'.esc_attr($due_ts ? date_i18n('Y-m', $due_ts) : '').'"'
+        .' data-date="'.esc_attr($due_ymd).'"'     /* <<< AQUI sem a barra invertida */
+        // NOVOS (ISO) — usados pelo histórico
+        .' data-created-ymd="'.esc_attr($created_ymd).'"'
+        .' data-due-ymd="'.esc_attr($due_ymd).'"'
+        .' data-paid-ymd="'.esc_attr($paid_ymd).'"'
+        .'></span>';
+
+}
+
+        $r .= '</td>';
+
+        $stat = strtoupper(trim($sub['status'] ?? ''));
+        $r .= '<td>';
+        if (in_array($stat,['CANCELLED','CANCELED','EXPIRED'],true)) {
+            $date = $sub['cancelled_at'] ?? ($sub['cancelledAt'] ?? ($sub['canceledAt'] ?? ($sub['expiredAt'] ?? ($sub['updated'] ?? ''))));
+            $r .= $date ? 'Cancelado em '.esc_html(date_i18n('d/m/Y', strtotime($date))) : 'Cancelado';
+        } else {
+            $r .= ($stat === 'ACTIVE') ? 'Ativo' : (($stat === 'INACTIVE') ? 'Inativo' : esc_html(ucfirst(strtolower($sub['status'] ?? '—'))));
+        }
+        $r .= '</td></tr>';
+        return $r;
+    };
+
+    $html = $search . $legend;
+
+    foreach (['em_atraso'=>'Em Atraso','em_dia'=>'Em Dia','canceladas'=>'Canceladas'] as $key=>$titulo) {
+        $html .= '<h3 class="dash-h3">Assinaturas — '.esc_html($titulo).'</h3>';
+        $html .= '<div class="dash-table-scroll" role="region" aria-label="Tabela '.esc_attr($titulo).'">';
+        $html .= "<table id='dash-table-{$key}' class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
+        if (empty($grupos[$key])) {
+            $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
+        } else {
+            foreach ($grupos[$key] as $entry) { $html .= $build_row($entry['sub'],$entry['payments'],(int)$entry['product_id'],$entry['signup_meta'] ?? []); }
+        }
+        $html .= '</tbody></table></div>';
+    }
+
+    
 
     return $html;
 }
