@@ -1260,28 +1260,55 @@ function dash_build_dashboard_js() {
   }
 
   // KPIs
-  function countVisibleRows(tableId){
-    var t=$id(tableId); if(!t) return 0;
-    var rows=t.querySelectorAll('tbody tr[id^=\"sub-\"]');
-    var n=0; rows.forEach(function(r){ if(r.style.display!=='none') n++; });
-    return n;
-  }
   function setText(id,txt){var el=$id(id); if(el){el.textContent=txt;}}
   function setBar(id,pct){var el=$id(id); if(el){el.style.width=Math.max(0,Math.min(100,pct))+'%';}}
   function pct(part,total){return total?Math.round((part/total)*100):0;}
+
+  function resolveRowStatus(tr){
+    if(!tr || tr.style.display==='none' || tr.classList.contains('hist-hide-row')) return null;
+
+    var tb = tr.closest('table');
+    var tid = tb && tb.id ? tb.id : '';
+    if (tid === 'dash-table-canceladas') return 'canceladas';
+    if (tid === 'dash-table-em_atraso') return 'em_atraso';
+    if (tid === 'dash-table-em_dia') return 'em_dia';
+
+    var tds = tr.getElementsByTagName('td');
+    var statusTxt = normalize(tds[4] ? (tds[4].textContent || '') : '');
+    if (statusTxt.indexOf('cancelad') > -1) return 'canceladas';
+
+    var hasBox=false, hasOver=false;
+    tr.querySelectorAll('.status-box').forEach(function(box){
+      if(box.classList.contains('month-dim-hide')) return;
+      hasBox=true;
+      if(box.classList.contains('overdue')) hasOver=true;
+    });
+    if(!hasBox) return null;
+    return hasOver ? 'em_atraso' : 'em_dia';
+  }
+
+  function getVisibleSummaryCounts(){
+    var counts={dia:0,atr:0,canc:0};
+    document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]').forEach(function(tr){
+      var st = resolveRowStatus(tr);
+      if(!st) return;
+      if(st==='canceladas'){ counts.canc++; return; }
+      if(st==='em_atraso'){ counts.atr++; return; }
+      counts.dia++;
+    });
+    return counts;
+  }
   function updateSummary(){
-    var visDia=countVisibleRows('dash-table-em_dia');
-    var visAtr=countVisibleRows('dash-table-em_atraso');
-    var visCanc=countVisibleRows('dash-table-canceladas');
-    var visTotal=visDia+visAtr+visCanc;
-    var pDia=pct(visDia,visTotal), pAtr=pct(visAtr,visTotal), pCan=pct(visCan,visTotal);
+    var vis = getVisibleSummaryCounts();
+    var visTotal = vis.dia + vis.atr + vis.canc;
+    var pDia = pct(vis.dia, visTotal), pAtr = pct(vis.atr, visTotal), pCan = pct(vis.canc, visTotal);
 
     setText('kpi-total-perc',(visTotal>0?'100%':'0%'));
     setText('kpi-dia-perc',pDia+'%'); setText('kpi-atraso-perc',pAtr+'%'); setText('kpi-cancel-perc',pCan+'%');
     setText('kpi-total-abs',visTotal+' assinaturas');
-    setText('kpi-dia-abs',visDia+' de '+visTotal);
-    setText('kpi-atraso-abs',visAtr+' de '+visTotal);
-    setText('kpi-cancel-abs',visCanc+' de '+visTotal);
+    setText('kpi-dia-abs',vis.dia+' de '+visTotal);
+    setText('kpi-atraso-abs',vis.atr+' de '+visTotal);
+    setText('kpi-cancel-abs',vis.canc+' de '+visTotal);
 
     setBar('bar-total',visTotal>0?100:0);
     setBar('bar-dia',pDia);
@@ -1523,22 +1550,20 @@ function dash_build_dashboard_js() {
     var histOn = !!window.__dashHistActive;
 
     // Snapshot das métricas visíveis no momento da exportação
-    var visDia = countVisibleRows('dash-table-em_dia');
-    var visAtr = countVisibleRows('dash-table-em_atraso');
-    var visCan = countVisibleRows('dash-table-canceladas');
-    var visTot = visDia + visAtr + visCan;
+    var visCounts = getVisibleSummaryCounts();
+    var visTot = visCounts.dia + visCounts.atr + visCounts.canc;
     function pctSafe(part){ return visTot ? Math.round((part/visTot)*100) : 0; }
-    var pctDia = pctSafe(visDia);
-    var pctAtr = pctSafe(visAtr);
-    var pctCan = pctSafe(visCan);
+    var pctDia = pctSafe(visCounts.dia);
+    var pctAtr = pctSafe(visCounts.atr);
+    var pctCan = pctSafe(visCounts.canc);
 
     var summaryTableHtml = `
       <table>
         <tr><th>Status</th><th>Quantidade</th><th>Percentual</th></tr>
         <tr style="background:#0a66c2;color:#fff"><td>Total de assinaturas</td><td>${visTot}</td><td>${visTot>0?'100%':'0%'}</td></tr>
-        <tr style="background:#16a34a;color:#fff"><td>Em Dia</td><td>${visDia}</td><td>${pctDia}%</td></tr>
-        <tr style="background:#e11d48;color:#fff"><td>Em Atraso</td><td>${visAtr}</td><td>${pctAtr}%</td></tr>
-        <tr style="background:#111;color:#fff"><td>Canceladas</td><td>${visCan}</td><td>${pctCan}%</td></tr>
+        <tr style="background:#16a34a;color:#fff"><td>Em Dia</td><td>${visCounts.dia}</td><td>${pctDia}%</td></tr>
+        <tr style="background:#e11d48;color:#fff"><td>Em Atraso</td><td>${visCounts.atr}</td><td>${pctAtr}%</td></tr>
+        <tr style="background:#111;color:#fff"><td>Canceladas</td><td>${visCounts.canc}</td><td>${pctCan}%</td></tr>
       </table>
       <br/>
     `;
@@ -2086,8 +2111,12 @@ function resolveHistoricalStatus(box, refInt){
       }
     });
 
-    if (window.dashRegroupRows) { window.dashRegroupRows(); }
-    if (window.updateSummary)   window.updateSummary();
+    if (typeof window.dashApplyFilter === 'function') {
+      window.dashApplyFilter();
+    } else {
+      if (window.dashRegroupRows) { window.dashRegroupRows(); }
+      if (window.updateSummary)   window.updateSummary();
+    }
   }
 
   function clearHistorical(){
@@ -2557,7 +2586,7 @@ function mostrar_dashboard_assinantes($atts = []) {
 
     <!-- Banner do histórico -->
     <div id="dash-hist-banner" class="dash-hist-banner" style="display:none" role="status" aria-live="polite">
-      Modo histórico ativo em <strong id="dash-hist-date-label"></strong>. Os filtros normais ficam temporariamente ignorados.
+      Modo histórico ativo em <strong id="dash-hist-date-label"></strong>. Os filtros podem ser combinados com a busca, curso e mês.
     </div>';
 
 
