@@ -2569,9 +2569,6 @@ function mostrar_dashboard_assinantes($atts = []) {
       <span><span class="status-box future" tabindex="0" aria-label="Não criada"></span> Não criada</span>
     </div>';
 
-    // Inicia HTML
-    $html  = $search . $legend;
-
     // ===== Tabela builder =====
     $build_row = function(array $sub, array $payments, int $product_id, array $meta = []) use ($agora, $hojeYmd) {
         $subscription_pk_id = (int)($sub['id'] ?? 0);
