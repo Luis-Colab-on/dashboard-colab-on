@@ -32,10 +32,22 @@ add_filter('widget_block_content','dash_dynamic_shortcode_alias',9);
 /**
  * Gate: apenas admins podem ver o dashboard.
  */
-function dash_user_can_view_dashboard() {
+function dash_get_scope_id($filter_id, $filter_base_id = 0) {
+    $fid = (int)$filter_id;
+    $fbase = (int)$filter_base_id;
+    return $fid ?: $fbase;
+}
+
+/**
+ * Gate: apenas admins podem ver o dashboard.
+ * Quando há ID no shortcode, valida se o usuário tem permissão para aquele ID específico.
+ */
+function dash_user_can_view_dashboard($filter_id = 0, $filter_base_id = 0) {
     if (!is_user_logged_in()) return false;
     if (current_user_can('manage_options')) return true;
-    return dash_is_user_whitelisted(get_current_user_id());
+    $scope = dash_get_scope_id($filter_id, $filter_base_id);
+    $alt_scope = ($filter_base_id && $filter_base_id !== $scope) ? (int)$filter_base_id : 0;
+    return dash_is_user_whitelisted(get_current_user_id(), $scope, $alt_scope);
 }
 
 /**
@@ -71,13 +83,49 @@ function dash_page_has_dashboard_shortcode() {
 }
 
 /**
- * Renderiza o bloco de login quando o usuário não pode ver o dashboard.
+ * Detecta o ID do shortcode na página (se houver).
  */
-function dash_render_login_prompt() {
+function dash_detect_shortcode_scope_id() {
+    if (is_admin()) return 0;
+    global $post;
+    if (!$post instanceof WP_Post) return 0;
+    $content = $post->post_content ?? '';
+    if (!is_string($content) || $content === '') return 0;
+
+    if (preg_match('/dashboard_assinantes_e_pedidos_(\d+)/i', $content, $m)) {
+        return (int)$m[1];
+    }
+    if (preg_match('/\[dashboard_assinantes_e_pedidos[^\]]*(id|corseid)\s*=\s*["\']?\s*(\d+)/i', $content, $m)) {
+        return (int)$m[2];
+    }
+    return 0;
+}
+
+/**
+ * Renderiza o bloco de login quando o usuário não pode ver o dashboard.
+ * @param int $filter_id      ID do shortcode (se houver).
+ * @param int $filter_base_id ID base do produto (quando houver relação pai/filho).
+ */
+function dash_render_login_prompt($filter_id = 0, $filter_base_id = 0) {
     $redirect = dash_get_current_url();
     $is_logged = is_user_logged_in();
-    $status_meta = $is_logged ? dash_get_request_status_meta(get_current_user_id()) : ['status'=>'','updated'=>0];
+    $scope_id = dash_get_scope_id($filter_id, $filter_base_id);
+    $uid = $is_logged ? get_current_user_id() : 0;
+    $status_meta = $is_logged ? dash_get_request_status_meta($uid) : ['status'=>'','updated'=>0];
     $status = $status_meta['status'] ?? '';
+    $scope_allowed = $is_logged ? dash_is_user_whitelisted($uid, $scope_id, (int)$filter_base_id) : false;
+    // Evita loop de reload quando o status geral é "approved" mas o scope atual não está liberado
+    if (!$scope_allowed && $status === 'approved') {
+        $status = '';
+    }
+    $has_pending_scope = $is_logged ? dash_user_has_pending_for_scope($uid, $scope_id) : false;
+    if (!$scope_allowed && !$has_pending_scope && $status === 'pending') {
+        $status = '';
+    }
+    // Status vazio quando não há pendência para este scope
+    if (!$scope_allowed && !$has_pending_scope && $scope_id > 0) {
+        $status = '';
+    }
     $message  = $is_logged
         ? 'Sua conta ainda não tem permissão para ver o dashboard. Solicite aprovação para continuar.'
         : 'Informe seu usuário ou e-mail e senha para acessar o dashboard.';
@@ -140,7 +188,7 @@ function dash_render_login_prompt() {
 
     $status_msg = '';
     if ($status === 'pending') {
-        $status_msg = '<p class="dash-request-status">Solicitação pendente de aprovação.</p>';
+        $status_msg = '';
     } elseif ($status === 'rejected') {
         $status_msg = '<p class="dash-request-status">Solicitação recusada. Você pode enviar uma nova solicitação.</p>';
     }
@@ -160,6 +208,7 @@ function dash_render_login_prompt() {
               <div class="dash-request-sent" '.($status === 'pending' ? '' : 'style="display:none"').'>Solicitação enviada. Aguarde a aprovação do administrador.</div>
               <form class="dash-request-form" method="post" action="'.$action.'" data-dash-request="1" '.($status === 'pending' ? 'style="display:none"' : '').'>
                 <input type="hidden" name="action" value="dash_request_access">
+                <input type="hidden" name="dash_request_scope" value="'.esc_attr($scope_id).'">
                 '.wp_nonce_field('dash_request_access', '_dashreq', true, false).'
                 <label for="dash-request-name">Nome completo</label>
                 <input type="text" name="dash_request_name" id="dash-request-name" value="'.esc_attr($prefill).'" required>
@@ -182,6 +231,7 @@ function dash_render_login_prompt() {
           var sent = blk.querySelector(".dash-request-sent");
           var statusLabel = blk.querySelector(".dash-request-status");
           var current = blk.getAttribute("data-dash-status") || "";
+          var scopeId = '.(int)$scope_id.';
 
           function apply(state){
             current = state;
@@ -194,7 +244,7 @@ function dash_render_login_prompt() {
               return;
             }
             if(state === "pending"){
-              if(statusLabel){ statusLabel.textContent = "Solicitação pendente de aprovação."; statusLabel.style.display = ""; }
+              if(statusLabel){ statusLabel.textContent = ""; statusLabel.style.display = "none"; }
               if(sent){ sent.style.display = ""; sent.textContent = "Solicitação enviada. Aguarde a aprovação do administrador."; }
               if(form){ form.style.display = "none"; }
               return;
@@ -212,13 +262,18 @@ function dash_render_login_prompt() {
           function poll(){
             var fd = new FormData();
             fd.append("action","dash_request_status");
+            fd.append("scope_id", String(scopeId || ""));
             fd.append("_dashnonce","'.esc_js($status_nonce).'");
             fetch("'.$ajax.'",{method:"POST",credentials:"same-origin",body:fd})
               .then(function(r){ return r.json(); })
               .then(function(res){
                 if(!res || !res.success || !res.data) return;
-                if(res.data.status && res.data.status !== current){
-                  apply(res.data.status);
+                var incoming = res.data.status || "";
+                if(current === "pending" && incoming !== "approved" && incoming !== "rejected"){
+                  return; // mantém estático enquanto pendente
+                }
+                if(incoming && incoming !== current){
+                  apply(incoming);
                 }
               })
               .catch(function(){});
@@ -270,12 +325,13 @@ function dash_handle_request_access() {
         exit;
     }
     $uid = get_current_user_id();
-    if (current_user_can('manage_options') || dash_is_user_whitelisted($uid)) {
+    $scope_id = isset($_POST['dash_request_scope']) ? (int)$_POST['dash_request_scope'] : 0;
+    if (current_user_can('manage_options') || dash_is_user_whitelisted($uid, $scope_id)) {
         wp_safe_redirect(add_query_arg('dash_req','approved',$redirect));
         exit;
     }
     $name = isset($_POST['dash_request_name']) ? wp_unslash($_POST['dash_request_name']) : '';
-    dash_add_pending_request($uid, $name);
+    dash_add_pending_request($uid, $name, $scope_id);
     dash_set_request_status_meta($uid, 'pending');
     wp_safe_redirect(add_query_arg('dash_req','sent',$redirect));
     exit;
@@ -294,12 +350,13 @@ function dash_handle_decide_access() {
         wp_die('Nonce inválido');
     }
     $uid = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
+    $scope_id = isset($_POST['scope_id']) ? (int)$_POST['scope_id'] : 0;
     $decision = isset($_POST['decision']) ? sanitize_text_field(wp_unslash($_POST['decision'])) : '';
     if ($uid > 0) {
         if ($decision === 'approve') {
-            dash_approve_request($uid);
+            dash_approve_request($uid, $scope_id);
         } elseif ($decision === 'reject') {
-            dash_reject_request($uid);
+            dash_reject_request($uid, $scope_id);
         }
     }
     $back = wp_get_referer() ?: home_url();
@@ -656,27 +713,114 @@ function dash_get_whitelist() {
     $list = get_option('dash_access_whitelist');
     return is_array($list) ? $list : [];
 }
-function dash_is_user_whitelisted($user_id) {
+
+/**
+ * Renderiza cards de solicitações pendentes (admin).
+ */
+function dash_render_request_cards(array $pending, $action_url, $nonce_field, $show_empty = false) {
+    $html = '';
+    foreach ($pending as $req) {
+        $uid = (int)($req['user_id'] ?? 0);
+        $scope = (int)($req['scope_id'] ?? 0);
+        $nm  = $req['name'] ?? '';
+        $em  = $req['email'] ?? '';
+        $lg  = $req['login'] ?? '';
+        $ts  = !empty($req['time']) ? wp_date('d/m/Y H:i', (int)$req['time']) : '';
+        $scope_label = 'Dashboard geral';
+        if ($scope > 0) {
+            $base = dash_maybe_get_parent_product_id($scope);
+            $scope_name = dash_get_product_name($base ?: $scope);
+            $scope_label = 'Curso: '.$scope_name;
+        }
+        $html .= '<div class="dash-request-card"><div class="dash-request-meta"><strong>'.esc_html($nm ?: 'Solicitante sem nome').'</strong><div>'.esc_html($em ?: 'Sem e-mail').' · '.esc_html($lg ?: 'sem login').'</div><div>'.esc_html($scope_label).'</div><div>Enviado em '.esc_html($ts ?: '—').'</div></div><div class="dash-request-actions">';
+        $html .= '<form method="post" action="'.esc_url($action_url).'">'.$nonce_field.'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr($uid).'"><input type="hidden" name="scope_id" value="'.esc_attr($scope).'"><input type="hidden" name="decision" value="approve"><button type="submit" class="button button-primary">Aceitar</button></form>';
+        $html .= '<form method="post" action="'.esc_url($action_url).'">'.$nonce_field.'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr($uid).'"><input type="hidden" name="scope_id" value="'.esc_attr($scope).'"><input type="hidden" name="decision" value="reject"><button type="submit" class="button">Recusar</button></form>';
+        $html .= '</div></div>';
+    }
+    if ($html === '' && $show_empty) {
+        $html = '<div class="dash-requests-empty">Nenhuma solicitação pendente.</div>';
+    }
+    return $html;
+}
+function dash_is_user_whitelisted($user_id, $scope_id = 0, $alt_scope_id = 0) {
     $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
+    $alt_scope_id = (int)$alt_scope_id;
     if (!$user_id) return false;
     $list = dash_get_whitelist();
-    return !empty($list[$user_id]);
+    if (!array_key_exists($user_id, $list)) return false;
+    $entry = $list[$user_id];
+
+    // compat: valor booleano antigo = acesso geral
+    if ($entry === true) return true;
+
+    if (!is_array($entry)) return false;
+
+    if (!empty($entry['general'])) return true;
+
+    $ids = array_map('intval', (array)($entry['ids'] ?? []));
+
+    if ($scope_id > 0 && in_array($scope_id, $ids, true)) return true;
+    if ($alt_scope_id > 0 && $alt_scope_id !== $scope_id && in_array($alt_scope_id, $ids, true)) return true;
+
+    return false;
 }
-function dash_add_to_whitelist($user_id) {
+function dash_add_to_whitelist($user_id, $scope_id = 0) {
     $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
     if (!$user_id) return;
     $list = dash_get_whitelist();
-    $list[$user_id] = true;
+
+    // acesso geral
+    if ($scope_id <= 0) {
+        $list[$user_id] = ['general' => true];
+        update_option('dash_access_whitelist', $list, false);
+        return;
+    }
+
+    $entry = $list[$user_id] ?? [];
+    if ($entry === true) { // compatibilidade
+        $entry = ['general' => true];
+    }
+    if (!is_array($entry)) $entry = [];
+    $ids = array_map('intval', isset($entry['ids']) && is_array($entry['ids']) ? $entry['ids'] : []);
+    if (!in_array($scope_id, $ids, true)) {
+        $ids[] = $scope_id;
+    }
+    $entry['ids'] = $ids;
+    $list[$user_id] = $entry;
     update_option('dash_access_whitelist', $list, false);
 }
-function dash_remove_from_whitelist($user_id) {
+function dash_remove_from_whitelist($user_id, $scope_id = 0) {
     $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
     if (!$user_id) return;
     $list = dash_get_whitelist();
-    if (isset($list[$user_id])) {
+    if (!isset($list[$user_id])) return;
+
+    if ($scope_id <= 0 || $list[$user_id] === true) {
         unset($list[$user_id]);
         update_option('dash_access_whitelist', $list, false);
+        return;
     }
+
+    $entry = $list[$user_id];
+    if (!is_array($entry)) {
+        unset($list[$user_id]);
+        update_option('dash_access_whitelist', $list, false);
+        return;
+    }
+
+    $ids = array_map('intval', isset($entry['ids']) && is_array($entry['ids']) ? $entry['ids'] : []);
+    $ids = array_values(array_filter($ids, function($id) use ($scope_id){ return (int)$id !== $scope_id; }));
+    $entry['ids'] = $ids;
+
+    if (empty($ids) && empty($entry['general'])) {
+        unset($list[$user_id]);
+    } else {
+        $list[$user_id] = $entry;
+    }
+    update_option('dash_access_whitelist', $list, false);
 }
 function dash_get_pending_requests() {
     $req = get_option('dash_access_requests');
@@ -684,6 +828,17 @@ function dash_get_pending_requests() {
 }
 function dash_save_pending_requests(array $reqs) {
     update_option('dash_access_requests', $reqs, false);
+}
+function dash_user_has_pending_for_scope($user_id, $scope_id = 0) {
+    $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
+    if (!$user_id) return false;
+    foreach (dash_get_pending_requests() as $p) {
+        if ((int)($p['user_id'] ?? 0) === $user_id && (int)($p['scope_id'] ?? 0) === $scope_id) {
+            return true;
+        }
+    }
+    return false;
 }
 function dash_set_request_status_meta($user_id, $status) {
     $user_id = (int)$user_id;
@@ -699,41 +854,45 @@ function dash_get_request_status_meta($user_id) {
         'updated' => (int)get_user_meta($user_id, 'dash_request_updated', true),
     ];
 }
-function dash_add_pending_request($user_id, $name) {
+function dash_add_pending_request($user_id, $name, $scope_id = 0) {
     $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
     if (!$user_id) return;
     $pending = dash_get_pending_requests();
     foreach ($pending as $p) {
-        if ((int)($p['user_id'] ?? 0) === $user_id) {
+        if ((int)($p['user_id'] ?? 0) === $user_id && (int)($p['scope_id'] ?? 0) === $scope_id) {
             return;
         }
     }
     $u = get_userdata($user_id);
     $pending[] = [
         'user_id' => $user_id,
+        'scope_id'=> $scope_id,
         'name'    => sanitize_text_field($name ?: ($u ? $u->display_name : '')),
         'login'   => $u ? $u->user_login : '',
         'email'   => $u ? $u->user_email : '',
-        'time'    => time(),
+        'time'    => current_time('timestamp'),
     ];
     dash_save_pending_requests($pending);
 }
-function dash_approve_request($user_id) {
+function dash_approve_request($user_id, $scope_id = 0) {
     $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
     if (!$user_id) return;
     $pending = dash_get_pending_requests();
-    $pending = array_values(array_filter($pending, function($r) use ($user_id){ return (int)($r['user_id'] ?? 0) !== $user_id; }));
+    $pending = array_values(array_filter($pending, function($r) use ($user_id, $scope_id){ return (int)($r['user_id'] ?? 0) !== $user_id || (int)($r['scope_id'] ?? 0) !== $scope_id; }));
     dash_save_pending_requests($pending);
-    dash_add_to_whitelist($user_id);
+    dash_add_to_whitelist($user_id, $scope_id);
     dash_set_request_status_meta($user_id, 'approved');
 }
-function dash_reject_request($user_id) {
+function dash_reject_request($user_id, $scope_id = 0) {
     $user_id = (int)$user_id;
+    $scope_id = (int)$scope_id;
     if (!$user_id) return;
     $pending = dash_get_pending_requests();
-    $pending = array_values(array_filter($pending, function($r) use ($user_id){ return (int)($r['user_id'] ?? 0) !== $user_id; }));
+    $pending = array_values(array_filter($pending, function($r) use ($user_id, $scope_id){ return (int)($r['user_id'] ?? 0) !== $user_id || (int)($r['scope_id'] ?? 0) !== $scope_id; }));
     dash_save_pending_requests($pending);
-    dash_remove_from_whitelist($user_id);
+    dash_remove_from_whitelist($user_id, $scope_id);
     dash_set_request_status_meta($user_id, 'rejected');
 }
 
@@ -748,12 +907,49 @@ function dash_ajax_request_status() {
         wp_send_json_error(['message'=>'nonce']);
     }
     $uid = get_current_user_id();
+    $scope = isset($_POST['scope_id']) ? (int)$_POST['scope_id'] : 0;
+    $scope_base = $scope ? dash_maybe_get_parent_product_id($scope) : 0;
+    $allowed = dash_is_user_whitelisted($uid, $scope, $scope_base);
     $meta = dash_get_request_status_meta($uid);
     $status = $meta['status'] ?? '';
-    wp_send_json_success(['status' => $status]);
+
+    $pending_scope = dash_user_has_pending_for_scope($uid, $scope);
+    if ($allowed) {
+        $status = 'approved';
+    } elseif ($pending_scope) {
+        $status = 'pending';
+    } else {
+        $status = '';
+    }
+
+    wp_send_json_success([
+        'status'  => $status,
+        'allowed' => $allowed ? 1 : 0,
+        'message' => $allowed ? '' : 'Sua conta ainda não tem permissão para este dashboard.',
+    ]);
 }
 add_action('wp_ajax_dash_request_status','dash_ajax_request_status');
 add_action('wp_ajax_nopriv_dash_request_status', function(){ wp_send_json_error(['message'=>'auth']); });
+
+/**
+ * AJAX: pendências em tempo real (somente admin).
+ */
+function dash_ajax_pending_requests() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error(['message'=>'auth']);
+    }
+    if (!isset($_POST['_dashreqnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_dashreqnonce'])), 'dash_pending_requests')) {
+        wp_send_json_error(['message'=>'nonce']);
+    }
+    $pending = dash_get_pending_requests();
+    $action = admin_url('admin-post.php');
+    $cards = dash_render_request_cards($pending, $action, wp_nonce_field('dash_decide_access','_dashdec',true,false), true);
+    wp_send_json_success([
+        'html'  => $cards,
+        'count' => count($pending),
+    ]);
+}
+add_action('wp_ajax_dash_pending_requests','dash_ajax_pending_requests');
 
 /**
  * AJAX: cria/atualiza solicitação de acesso sem redirecionar.
@@ -766,13 +962,14 @@ function dash_ajax_request_access() {
         wp_send_json_error(['message'=>'nonce']);
     }
     $uid = get_current_user_id();
-    if (current_user_can('manage_options') || dash_is_user_whitelisted($uid)) {
+    $scope_id = isset($_POST['dash_request_scope']) ? (int)$_POST['dash_request_scope'] : 0;
+    if (current_user_can('manage_options') || dash_is_user_whitelisted($uid, $scope_id)) {
         dash_set_request_status_meta($uid, 'approved');
         wp_send_json_success(['status'=>'approved','message'=>'Solicitação aprovada!']);
     }
 
     $name = isset($_POST['dash_request_name']) ? wp_unslash($_POST['dash_request_name']) : '';
-    dash_add_pending_request($uid, $name);
+    dash_add_pending_request($uid, $name, $scope_id);
     dash_set_request_status_meta($uid, 'pending');
     wp_send_json_success(['status'=>'pending','message'=>'Solicitação enviada. Aguarde a aprovação do administrador.']);
 }
@@ -928,6 +1125,7 @@ CSS;
 .dash-request-actions button{cursor:pointer;}
 .dash-request-actions .button-primary{background:var(--dash-primary);border-color:var(--dash-primary);color:#fff;}
 .dash-request-actions .button-primary:hover{background:var(--dash-primary-dark);border-color:var(--dash-primary-dark);}
+.dash-requests-empty{padding:10px 8px;color:#6b7280;}
 .dash-user-icon-wrap{display:flex;align-items:center;gap:8px;margin:0 0 8px;}
 .dash-user-icon{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:12px;background:rgba(10,102,194,.12);border:1px solid rgba(10,102,194,.22);box-shadow:0 6px 18px rgba(0,0,0,.08);cursor:pointer;color:var(--dash-primary);font-weight:800;}
 .dash-user-icon span{font-size:18px;line-height:1;}
@@ -936,15 +1134,29 @@ CSS;
 .dash-accepted summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #d1d5db;border-radius:12px;background:#fff;box-shadow:0 8px 20px rgba(0,0,0,.08);font-weight:700;color:var(--dash-text);}
 .dash-accepted summary::-webkit-details-marker{display:none;}
 .dash-accepted summary:hover{border-color:var(--dash-primary);color:var(--dash-primary);}
-.dash-accepted-list{position:absolute;z-index:50;top:46px;right:0;min-width:280px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,.14);padding:12px;max-height:360px;overflow:auto;}
-.dash-accepted-list h4{margin:0 0 8px;font-size:1rem;}
-.dash-accepted-close{position:absolute;top:8px;right:8px;border:0;background:transparent;color:#6b7280;font-size:18px;font-weight:800;cursor:pointer;line-height:1;border-radius:6px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;}
+.dash-accepted-list{left:-1rem;top:3.8rem;position:absolute;z-index:50;right:0;min-width:320px;width:clamp(320px,90vw,520px);max-width:clamp(320px,90vw,520px);background:#fff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 18px 42px rgba(0,0,0,.16);padding:14px 14px 12px;transform:none;}
+.dash-accepted-close{border:0;background:transparent;color:#6b7280;font-size:18px;font-weight:800;cursor:pointer;line-height:1;border-radius:8px;width:32px;height:32px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
 .dash-accepted-close:hover{color:var(--dash-primary);background:rgba(10,102,194,.08);}
-.dash-accepted-item{border-top:1px solid #e5e7eb;padding:10px 0;}
-.dash-accepted-item:first-of-type{border-top:0;padding-top:0;}
-.dash-accepted-item strong{display:block;}
-.dash-accepted-item small{color:#4b5563;}
-.dash-accepted-item form{margin-top:8px;}
+.dash-accepted-header{display:flex;align-items:center;gap:10px;margin:0 0 10px;}
+.dash-accepted-header h4{margin:0;font-size:1rem;}
+.dash-accepted-search{flex:1 1 auto;padding:8px 10px;border:1px solid #d1d5db;border-radius:10px;font-size:.92rem;transition:border-color .12s ease,box-shadow .12s ease;}
+.dash-accepted-search:focus{outline:none;border-color:var(--dash-primary);box-shadow:0 0 0 3px rgba(10,102,194,.16);}
+.dash-accepted-body{border:1px solid #e5e7eb;border-radius:12px;padding:6px;background:#f9fafb;max-height:calc(3 * 46px);overflow-y:auto;}
+.dash-accepted-item{border-bottom:1px solid #e5e7eb;}
+.dash-accepted-item:last-child{border-bottom:0;}
+.dash-accepted-accordion{margin:0;}
+.dash-accepted-accordion summary{list-style:none;display:flex;flex-direction:column;gap:4px;padding:10px 6px;cursor:pointer;align-items:flex-start;}
+.dash-accepted-accordion summary::-webkit-details-marker{display:none;}
+.dash-accepted-name{display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap;}
+.dash-accepted-name strong{font-size:.95rem;}
+.dash-accepted-name small{color:#4b5563;font-size:.86rem;}
+.dash-accepted-access{color:#4b5563;font-size:.82rem;}
+.dash-accepted-scopes{padding:0 6px 10px 6px;display:flex;flex-direction:column;gap:6px;}
+.dash-accepted-scope{display:flex;align-items:center;gap:10px;}
+.dash-accepted-scope-name{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.9rem;}
+.dash-accepted-form{margin:0;flex-shrink:0;}
+.dash-accepted-revoke{background:#fff;border:1px solid #e11d48;color:#e11d48;border-radius:999px;padding:6px 12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:background .14s ease,color .14s ease,transform .12s ease,box-shadow .14s ease;}
+.dash-accepted-revoke:hover{background:#e11d48;color:#fff;transform:translateY(-1px);box-shadow:0 10px 20px rgba(225,29,72,.2);}
 CSS;
     $css .= "\n" . dash_minify_css($css_extra_source);
 
@@ -1504,10 +1716,69 @@ function dash_build_dashboard_js() {
     setRowTooltips(buildCourseMap());
     ROWS = [].slice.call(document.querySelectorAll('.dash-table tbody tr[id^=\"sub-\"]'));
     updateSummary();
+
   }
   window.dashClearFilter = clearFilter; 
 
   onReady(init);
+})();
+
+(function(){
+  function normalize(s){ return (s||'').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+
+  function clampAcceptedToViewport(panel){
+    if (!panel) return;
+    panel.style.transform = 'translateX(0)';
+    var rect = panel.getBoundingClientRect();
+    var vw = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0);
+    var margin = 12;
+    var shift = 0;
+
+    if (rect.right > vw - margin) {
+      shift = rect.right - (vw - margin);
+    }
+    if ((rect.left - shift) < margin) {
+      shift = rect.left - margin;
+    }
+    if (shift !== 0) {
+      panel.style.transform = 'translateX(' + (-shift) + 'px)';
+    }
+  }
+
+  function bindAcceptedSearch(){
+    var list = document.querySelector('.dash-accepted-list');
+    if (!list) return;
+    var input = list.querySelector('.dash-accepted-search');
+    var items = list.querySelectorAll('.dash-accepted-item');
+    if (!input || !items.length) return;
+
+    function apply(){
+      var q = normalize(input.value);
+      items.forEach(function(it){
+        var nm = normalize(it.getAttribute('data-name') || it.textContent || '');
+        var em = normalize(it.getAttribute('data-email') || '');
+        var show = !q || nm.indexOf(q) > -1 || em.indexOf(q) > -1;
+        it.style.display = show ? '' : 'none';
+      });
+      clampAcceptedToViewport(list);
+    }
+
+    var details = list.closest('details');
+    function adjust(){ clampAcceptedToViewport(list); }
+    if (details){
+      details.addEventListener('toggle', function(){ if(details.open){ adjust(); } }, { passive:true });
+    }
+    window.addEventListener('resize', adjust);
+
+    input.addEventListener('input', apply);
+    apply();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bindAcceptedSearch, { once:true });
+  } else {
+    bindAcceptedSearch();
+  }
 })();
 
 (function(){
@@ -2045,7 +2316,9 @@ function dash_maybe_enqueue_dashboard_assets() {
     if (!dash_page_has_dashboard_shortcode()) {
         return;
     }
-    if (dash_user_can_view_dashboard()) {
+    $scope_id = dash_detect_shortcode_scope_id();
+    $scope_base_id = $scope_id ? dash_maybe_get_parent_product_id($scope_id) : 0;
+    if (dash_user_can_view_dashboard($scope_id, $scope_base_id)) {
         dash_enqueue_dashboard_assets();
     } else {
         dash_enqueue_login_assets();
@@ -2073,9 +2346,9 @@ function mostrar_dashboard_assinantes($atts = []) {
         $locked_course_name = dash_get_product_name($filter_base_id ?: $filter_id);
     }
 
-    if (!dash_user_can_view_dashboard()) {
+    if (!dash_user_can_view_dashboard($filter_id, $filter_base_id)) {
         dash_enqueue_login_assets();
-        return dash_render_login_prompt();
+        return dash_render_login_prompt($filter_id, $filter_base_id);
     }
 
     dash_enqueue_dashboard_assets();
@@ -2191,38 +2464,58 @@ function mostrar_dashboard_assinantes($atts = []) {
     $requests_html = '';
     $accepted_html = '';
     if (current_user_can('manage_options')) {
-        $pending = dash_get_pending_requests();
-        if (!empty($pending)) {
-            $requests_html .= '<div class="dash-requests" role="status" aria-live="polite"><h3>Solicitações de acesso</h3>';
+        if (!$locked_by_id) { // só no dashboard geral
+            $pending = dash_get_pending_requests();
+            $ajax = esc_url(admin_url('admin-ajax.php'));
             $action = esc_url(admin_url('admin-post.php'));
-            foreach ($pending as $req) {
-                $uid = (int)($req['user_id'] ?? 0);
-                $nm  = $req['name'] ?? '';
-                $em  = $req['email'] ?? '';
-                $lg  = $req['login'] ?? '';
-                $ts  = !empty($req['time']) ? date_i18n('d/m/Y H:i', (int)$req['time']) : '';
-                $requests_html .= '<div class="dash-request-card"><div class="dash-request-meta"><strong>'.esc_html($nm ?: 'Solicitante sem nome').'</strong><div>'.esc_html($em ?: 'Sem e-mail').' · '.esc_html($lg ?: 'sem login').'</div><div>Enviado em '.esc_html($ts ?: '—').'</div></div><div class="dash-request-actions">';
-                $requests_html .= '<form method="post" action="'.$action.'">'.wp_nonce_field('dash_decide_access','_dashdec',true,false).'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr($uid).'"><input type="hidden" name="decision" value="approve"><button type="submit" class="button button-primary">Aceitar</button></form>';
-                $requests_html .= '<form method="post" action="'.$action.'">'.wp_nonce_field('dash_decide_access','_dashdec',true,false).'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr($uid).'"><input type="hidden" name="decision" value="reject"><button type="submit" class="button">Recusar</button></form>';
-                $requests_html .= '</div></div>';
-            }
-            $requests_html .= '</div>';
-        }
+            $req_nonce = wp_create_nonce('dash_pending_requests');
+            $cards = dash_render_request_cards($pending, $action, wp_nonce_field('dash_decide_access','_dashdec',true,false), true);
+            $requests_html .= '<div class="dash-requests" data-dash-reqs="1" data-req-url="'.$ajax.'" data-req-nonce="'.$req_nonce.'" role="status" aria-live="polite"><h3>Solicitações de acesso</h3><div class="dash-requests-list">'.$cards.'</div></div>';
 
-        $whitelist = dash_get_whitelist();
-        if (!empty($whitelist)) {
-            $action = esc_url(admin_url('admin-post.php'));
-            $accepted_html .= '<div class="dash-accepted"><details><summary class="dash-user-icon-wrap"><span class="dash-user-icon" aria-label="Usuários liberados"><span>👤</span></span><span>Usuários liberados</span></summary><div class="dash-accepted-list" role="menu">';
-            $accepted_html .= '<button type="button" class="dash-accepted-close" aria-label="Fechar" onclick="this.closest(\'details\').removeAttribute(\'open\')">×</button>';
-            $accepted_html .= '<h4>Autorizados</h4>';
-            foreach (array_keys($whitelist) as $uid) {
-                $u = get_userdata((int)$uid);
-                if (!$u) continue;
-                $nm = $u->display_name ?: $u->user_login;
-                $em = $u->user_email ?: '';
-                $accepted_html .= '<div class="dash-accepted-item"><strong>'.esc_html($nm).'</strong><small>'.esc_html($em).'</small><form method="post" action="'.$action.'">'.wp_nonce_field('dash_decide_access','_dashdec',true,false).'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr((int)$uid).'"><input type="hidden" name="decision" value="reject"><button type="submit" class="button">Revogar</button></form></div>';
+            $whitelist = dash_get_whitelist();
+            if (!empty($whitelist)) {
+                $action = esc_url(admin_url('admin-post.php'));
+                $nonce   = wp_nonce_field('dash_decide_access','_dashdec',true,false);
+                $accepted_html .= '<div class="dash-accepted"><details><summary class="dash-user-icon-wrap"><span class="dash-user-icon" aria-label="Usuários liberados"><span>👤</span></span><span>Usuários liberados</span></summary><div class="dash-accepted-list" role="menu">';
+                $accepted_html .= '<div class="dash-accepted-header"><h4>Autorizados</h4><input type="search" class="dash-accepted-search" placeholder="Buscar por nome ou e-mail" aria-label="Buscar usuário liberado"><button type="button" class="dash-accepted-close" aria-label="Fechar" onclick="this.closest(\'details\').removeAttribute(\'open\')">×</button></div>';
+                $accepted_html .= '<div class="dash-accepted-body" role="menu">';
+                foreach ($whitelist as $uid => $entry) {
+                    $u = get_userdata((int)$uid);
+                    if (!$u) continue;
+                    $nm = $u->display_name ?: $u->user_login;
+                    $em = $u->user_email ?: '';
+
+                    $has_general = ($entry === true) || (is_array($entry) && !empty($entry['general']));
+                    $ids = [];
+                    if ($entry !== true && is_array($entry)) {
+                        $ids = array_values(array_unique(array_map('intval', isset($entry['ids']) && is_array($entry['ids']) ? $entry['ids'] : [])));
+                    }
+
+                    $scopes_html = '';
+                    $scope_count = 0;
+
+                    if ($has_general) {
+                        $scope_count++;
+                        $label = 'Geral (todos os dashboards)';
+                        $scopes_html .= '<div class="dash-accepted-scope" data-scope="0"><span class="dash-accepted-scope-name">'.esc_html($label).'</span><form class="dash-accepted-form" method="post" action="'.$action.'">'.$nonce.'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr((int)$uid).'"><input type="hidden" name="scope_id" value="0"><input type="hidden" name="decision" value="reject"><button type="submit" class="button dash-accepted-revoke">Revogar</button></form></div>';
+                    }
+
+                    foreach ($ids as $sid) {
+                        $scope_count++;
+                        $base = dash_maybe_get_parent_product_id($sid);
+                        $sname = dash_get_product_name($base ?: $sid);
+                        $label = $sname ?: ('ID '.$sid);
+                        $scopes_html .= '<div class="dash-accepted-scope" data-scope="'.esc_attr($sid).'"><span class="dash-accepted-scope-name" title="'.esc_attr($label).'">'.esc_html($label).'</span><form class="dash-accepted-form" method="post" action="'.$action.'">'.$nonce.'<input type="hidden" name="action" value="dash_decide_access"><input type="hidden" name="user_id" value="'.esc_attr((int)$uid).'"><input type="hidden" name="scope_id" value="'.esc_attr($sid).'"><input type="hidden" name="decision" value="reject"><button type="submit" class="button dash-accepted-revoke">Revogar</button></form></div>';
+                    }
+
+                    $meta = trim($em) !== '' ? $em : '';
+                    $summary_label = $has_general ? 'Acesso geral' : ($scope_count === 1 ? '1 acesso' : $scope_count.' acessos');
+                    $subtitle = $meta ? $meta.' · '.$summary_label : $summary_label;
+
+                    $accepted_html .= '<div class="dash-accepted-item" data-name="'.esc_attr($nm).'" data-email="'.esc_attr($em).'"><details class="dash-accepted-accordion"><summary><div class="dash-accepted-name"><strong>'.esc_html($nm).'</strong><small>'.esc_html($subtitle).'</small></div></summary><div class="dash-accepted-scopes">'.$scopes_html.'</div></details></div>';
+                }
+                $accepted_html .= '</div></div></details></div>';
             }
-            $accepted_html .= '</div></details></div>';
         }
     }
 
