@@ -1008,6 +1008,14 @@ function dash_build_dashboard_css() {
 :root{--dash-primary:#0a66c2;--dash-primary-dark:#084a8f;--dash-text:#1f2937;--dash-muted:#6b7280;--dash-border:#e5e7eb;--paid:#16a34a;--overdue:#e11d48;--pending:#f59e0b;--future:#e5e7eb;--box-border:rgba(0,0,0,.35);}
 .dash-wrap{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";color:var(--dash-text);}
 .dash-h3{margin:24px 0 8px;font-size:1.125rem;font-weight:700;}
+.dash-table-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:24px 0 8px;flex-wrap:wrap;}
+.dash-table-head .dash-h3{margin:0;flex:1 1 auto;}
+.dash-table-nav{display:none;align-items:center;gap:8px;flex:0 0 auto;}
+.dash-table-nav-btn{padding:6px 10px;border-radius:8px;background:var(--dash-primary);color:#fff;border:1px solid var(--dash-primary);cursor:pointer;font-weight:700;line-height:1;transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease,filter .14s ease;}
+.dash-table-nav-btn:hover{background:var(--dash-primary-dark);border-color:var(--dash-primary-dark);transform:translateY(-1px);}
+.dash-table-nav-btn:disabled{opacity:.45;cursor:not-allowed;transform:none;}
+.dash-table-nav-info{font-size:.92rem;color:#374151;font-weight:600;white-space:nowrap;}
+.dash-page-hidden{display:none!important;}
 .dash-table{width:100%;min-width:720px;border-collapse:separate;border-spacing:0;margin:8px 0 24px;font-size:.95rem;box-shadow:0 1px 2px rgba(0,0,0,.04);border:2px solid #000;border-radius:10px;overflow:visible;}
 .dash-table thead th{background:var(--dash-primary);color:#fff;padding:10px 8px;text-transform:uppercase;font-weight:600;letter-spacing:.03em;}
 .dash-table th,.dash-table td{padding:10px 8px;text-align:center;border-bottom:2px solid rgba(0,0,0,0.8);transition:background .15s ease,border-color .15s ease;}
@@ -1264,6 +1272,92 @@ function dash_build_dashboard_js() {
   function setBar(id,pct){var el=$id(id); if(el){el.style.width=Math.max(0,Math.min(100,pct))+'%';}}
   function pct(part,total){return total?Math.round((part/total)*100):0;}
 
+  var DASH_PAGE_SIZE = 100;
+  var DASH_TABLE_IDS = ['dash-table-em_atraso','dash-table-em_dia','dash-table-canceladas'];
+  var DASH_PAGE_STATE = {};
+
+  function getPageState(tableId){
+    if(!DASH_PAGE_STATE[tableId]){ DASH_PAGE_STATE[tableId] = { page:0 }; }
+    return DASH_PAGE_STATE[tableId];
+  }
+  function clampPage(tableId,totalPages){
+    var st=getPageState(tableId);
+    if(st.page >= totalPages){ st.page = totalPages - 1; }
+    if(st.page < 0){ st.page = 0; }
+    return st;
+  }
+  function updateTableNav(tableId,totalPages){
+    var head=document.querySelector('.dash-table-head[data-table-id="'+tableId+'"]');
+    var nav=head?head.querySelector('.dash-table-nav'):null;
+    var info=head?head.querySelector('.dash-table-nav-info'):null;
+    var prev=head?head.querySelector('.dash-table-nav-btn[data-dir="-1"]'):null;
+    var next=head?head.querySelector('.dash-table-nav-btn[data-dir="1"]'):null;
+    var st=getPageState(tableId);
+    if(!nav) return;
+
+    if(totalPages>1){
+      nav.style.display='flex';
+      if(info) info.textContent='Coluna '+(st.page+1)+'/'+totalPages;
+      if(prev) prev.disabled=(st.page===0);
+      if(next) next.disabled=(st.page>=totalPages-1);
+    }else{
+      nav.style.display='none';
+      if(info) info.textContent='Coluna 1/1';
+      st.page=0;
+      if(prev) prev.disabled=true;
+      if(next) next.disabled=true;
+    }
+  }
+
+  function applyPaginationFor(tableId){
+    var table=$id(tableId);
+    if(!table) return;
+    var rows=[].slice.call(table.querySelectorAll('tbody tr[id^="sub-"]'));
+    var visible=rows.filter(function(tr){
+      return tr.style.display!=='none' && !tr.classList.contains('hist-hide-row');
+    });
+
+    rows.forEach(function(tr){ tr.classList.remove('dash-page-hidden'); });
+
+    var totalPages=Math.max(1, Math.ceil(visible.length / DASH_PAGE_SIZE));
+    var st=clampPage(tableId,totalPages);
+
+    if(visible.length > DASH_PAGE_SIZE){
+      visible.forEach(function(tr, idx){
+        var pageIdx=Math.floor(idx / DASH_PAGE_SIZE);
+        if(pageIdx !== st.page){ tr.classList.add('dash-page-hidden'); }
+      });
+    }
+
+    updateTableNav(tableId,totalPages);
+  }
+
+  function bindPaginationNav(){
+    document.querySelectorAll('.dash-table-nav-btn').forEach(function(btn){
+      if(btn.dataset.pagBound==='1') return;
+      btn.dataset.pagBound='1';
+      btn.addEventListener('click', function(ev){
+        ev.preventDefault();
+        var tableId=btn.getAttribute('data-target')||'';
+        if(!tableId) return;
+        var delta=parseInt(btn.getAttribute('data-dir')||'0',10)||0;
+        var st=getPageState(tableId);
+        st.page += delta;
+        if (typeof window.updateSummary === 'function') {
+          window.updateSummary();
+        } else {
+          applyPaginationFor(tableId);
+        }
+      });
+    });
+  }
+
+  function dashApplyPagination(){
+    DASH_TABLE_IDS.forEach(applyPaginationFor);
+    bindPaginationNav();
+  }
+  window.dashApplyPagination = dashApplyPagination;
+
   function resolveRowStatus(tr){
     if(!tr || tr.style.display==='none' || tr.classList.contains('hist-hide-row')) return null;
 
@@ -1298,6 +1392,16 @@ function dash_build_dashboard_js() {
     });
     return counts;
   }
+  function countPageVisibleRows(){
+    var total = 0;
+    document.querySelectorAll('.dash-table tbody tr[id^="sub-"]').forEach(function(tr){
+      if(tr.style.display==='none') return;
+      if(tr.classList.contains('hist-hide-row')) return;
+      if(tr.classList.contains('dash-page-hidden')) return;
+      total++;
+    });
+    return total;
+  }
   function updateSummary(){
     var vis = getVisibleSummaryCounts();
     var visTotal = vis.dia + vis.atr + vis.canc;
@@ -1319,10 +1423,15 @@ function dash_build_dashboard_js() {
     setBar('seg-atraso',pAtr);
     setBar('seg-cancel',pCan);
 
+    if (typeof window.dashApplyPagination === 'function') {
+      window.dashApplyPagination();
+    }
+
     var note = $id('dash-summary-note');
     if (note) {
       var totalBase = parseInt(note.getAttribute('data-total') || '0', 10) || visTotal;
-      note.textContent = 'Mostrando ' + visTotal + ' de ' + totalBase + ' assinaturas';
+      var showingNow = countPageVisibleRows();
+      note.textContent = 'Mostrando ' + showingNow + ' de ' + totalBase + ' assinaturas';
     }
   }
   window.updateSummary = updateSummary;
@@ -2782,9 +2891,16 @@ foreach ($installments as $p) {
     $html = $search . $legend;
 
     foreach (['em_atraso'=>'Em Atraso','em_dia'=>'Em Dia','canceladas'=>'Canceladas'] as $key=>$titulo) {
+        $table_id = "dash-table-{$key}";
+        $html .= '<div class="dash-table-head" data-table-id="'.esc_attr($table_id).'">';
         $html .= '<h3 class="dash-h3">Assinaturas — '.esc_html($titulo).'</h3>';
+        $html .= '<div class="dash-table-nav" data-table-nav="'.esc_attr($table_id).'" aria-label="Navegação por colunas">';
+        $html .= '<button type="button" class="dash-table-nav-btn" data-target="'.esc_attr($table_id).'" data-dir="-1" aria-label="Coluna anterior">&larr;</button>';
+        $html .= '<span class="dash-table-nav-info">Coluna 1/1</span>';
+        $html .= '<button type="button" class="dash-table-nav-btn" data-target="'.esc_attr($table_id).'" data-dir="1" aria-label="Próxima coluna">&rarr;</button>';
+        $html .= '</div></div>';
         $html .= '<div class="dash-table-scroll" role="region" aria-label="Tabela '.esc_attr($titulo).'">';
-        $html .= "<table id='dash-table-{$key}' class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
+        $html .= "<table id='{$table_id}' class='dash-table' role='table' aria-label='Assinaturas {$titulo}'><thead><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Pagamentos</th><th>Status</th></tr></thead><tbody>";
         if (empty($grupos[$key])) {
             $html .= "<tr><td colspan='5'><em>Nenhuma assinatura nesta categoria.</em></td></tr>";
         } else {
